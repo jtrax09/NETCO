@@ -1,0 +1,135 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Hardened Global Primitives ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrapSuperAdmin() {
+      return isSignedIn()
+        && (request.auth.token.email == 'undergodmusic255@gmail.com'
+          || request.auth.token.email == 'mlingwajastine277@gmail.com');
+    }
+
+    function isAdmin() {
+      return isBootstrapSuperAdmin()
+        || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // --- Entity Validation Blueprints ---
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
+        && data.role in ['SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR', 'CASHIER']
+        && data.updatedAt == request.time;
+    }
+
+    function isValidPublicPackage(data) {
+      return data.keys().hasAll([
+          'packageId', 'name', 'category', 'priceTzs',
+          'durationMinutes', 'downloadKbps', 'uploadKbps', 'isActive', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'packageId', 'name', 'description', 'category', 'priceTzs',
+          'durationMinutes', 'downloadKbps', 'uploadKbps', 'isActive', 'updatedAt'
+        ])
+        && isValidId(data.packageId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && (!('description' in data) || (data.description is string && data.description.size() <= 300))
+        && data.category in ['HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY']
+        && data.priceTzs is number && data.priceTzs >= 0 && data.priceTzs <= 100000000
+        && data.durationMinutes is int && data.durationMinutes >= 1 && data.durationMinutes <= 525600
+        && data.downloadKbps is int && data.downloadKbps >= 64 && data.downloadKbps <= 10000000
+        && data.uploadKbps is int && data.uploadKbps >= 64 && data.uploadKbps <= 10000000
+        && data.isActive is bool
+        && data.updatedAt == request.time;
+    }
+
+    function isValidWorkspacePreference(data, expectedUid) {
+      return data.keys().hasAll(['ownerUid', 'theme', 'compactTables', 'updatedAt'])
+        && data.keys().hasOnly(['ownerUid', 'theme', 'compactTables', 'updatedAt'])
+        && isValidId(data.ownerUid)
+        && data.ownerUid == expectedUid
+        && data.theme in ['dark', 'light']
+        && data.compactTables is bool
+        && data.updatedAt == request.time;
+    }
+
+    // --- Collection Rules ---
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isAdmin() || (isSignedIn() && request.auth.uid == adminId));
+      allow list: if isAdmin();
+      allow create: if isValidId(adminId)
+        && isAdmin()
+        && isValidAdminUser(incoming())
+        && incoming().uid == adminId;
+      allow update: if isValidId(adminId)
+        && isAdmin()
+        && isValidAdminUser(incoming())
+        && incoming().uid == existing().uid
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'email', 'updatedAt']);
+      allow delete: if isValidId(adminId) && isBootstrapSuperAdmin();
+    }
+
+    match /packages/{packageId} {
+      allow get: if isValidId(packageId) && (resource.data.isActive == true || isAdmin());
+      allow list: if resource.data.isActive == true || isAdmin();
+      allow create: if isValidId(packageId)
+        && isAdmin()
+        && isValidPublicPackage(incoming())
+        && incoming().packageId == packageId;
+      allow update: if isValidId(packageId)
+        && isAdmin()
+        && isValidPublicPackage(incoming())
+        && incoming().packageId == existing().packageId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'description', 'category', 'priceTzs',
+          'durationMinutes', 'downloadKbps', 'uploadKbps', 'isActive', 'updatedAt'
+        ]);
+      allow delete: if isValidId(packageId) && isAdmin();
+    }
+
+    match /workspace_prefs/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && request.auth.uid == userId;
+      allow list: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
+      allow create: if isValidId(userId)
+        && isSignedIn()
+        && request.auth.uid == userId
+        && isValidWorkspacePreference(incoming(), userId);
+      allow update: if isValidId(userId)
+        && isSignedIn()
+        && request.auth.uid == userId
+        && isValidWorkspacePreference(incoming(), userId)
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().diff(existing()).affectedKeys().hasOnly(['theme', 'compactTables', 'updatedAt']);
+      allow delete: if isValidId(userId) && isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Connection check document (read-only ping)
+    match /test/connection {
+      allow get: if true;
+    }
+  }
+}

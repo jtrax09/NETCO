@@ -1,0 +1,6 @@
+{
+  "name": "NETCO",
+  "description": "NETCO Network Management System — WiFi hotspot billing, one-device voucher enforcement, mobile money integration, and MikroTik RouterOS management. CONNECT. CONTROL. EXPERIENCE.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,122 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized NETCO administrator record linked to Firebase Authentication.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "enum": ["SUPER_ADMIN", "ADMIN", "NETWORK_OPERATOR", "CASHIER"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "displayName", "role", "updatedAt"]
+    },
+    "PublicPackage": {
+      "title": "PublicPackage",
+      "description": "Publicly browsable WiFi hotspot billing package synced for captive portal discovery.",
+      "type": "object",
+      "properties": {
+        "packageId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "category": {
+          "type": "string",
+          "enum": ["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]
+        },
+        "priceTzs": {
+          "type": "number"
+        },
+        "durationMinutes": {
+          "type": "integer"
+        },
+        "downloadKbps": {
+          "type": "integer"
+        },
+        "uploadKbps": {
+          "type": "integer"
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["packageId", "name", "category", "priceTzs", "durationMinutes", "downloadKbps", "uploadKbps", "isActive", "updatedAt"]
+    },
+    "WorkspacePreference": {
+      "title": "WorkspacePreference",
+      "description": "Per-admin UI theme and workspace preferences stored privately per user.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "theme": {
+          "type": "string",
+          "enum": ["dark", "light"]
+        },
+        "compactTables": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerUid", "theme", "compactTables", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Bootstrapped and authorized NETCO admin records."
+    },
+    "/packages/{packageId}": {
+      "schema": { "$ref": "#/entities/PublicPackage" },
+      "description": "Publicly readable active hotspot packages maintained by admins."
+    },
+    "/workspace_prefs/{userId}": {
+      "schema": { "$ref": "#/entities/WorkspacePreference" },
+      "description": "Private UI preferences isolated by owner UID."
+    }
+  }
+}
