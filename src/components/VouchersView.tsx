@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Download, FileText, Plus, Printer, Search, X } from 'lucide-react';
-import { apiRequest, formatDurationMinutes, formatTzs } from '../lib/api.ts';
+import { apiRequest, formatDurationMinutes, formatTzs, getTenantHeaders } from '../lib/api.ts';
 import { exportVouchersPdf } from '../lib/pdfExport.ts';
 
 interface VoucherItem {
@@ -145,7 +145,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
     try {
       setError(null);
       const res = await fetch(`/api/vouchers/export/csv?status=${statusFilter}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, ...getTenantHeaders() },
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -155,7 +155,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'netco-vouchers.csv';
+      a.download = 'traxlink-vouchers.csv';
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -180,7 +180,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search batch, package, masked code..."
-              className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#101827] focus:outline-none focus:border-[#16B8FF]"
+              className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-stone-200 dark:border-white/10 bg-white dark:bg-[#161618] focus:outline-none focus:border-[#FFD400]"
             />
           </form>
 
@@ -244,11 +244,11 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
 
       {/* Printable Voucher Sheet (hidden on screen unless printing, or standard table on screen) */}
       <div className="hidden print-only space-y-4">
-        <h2 className="text-lg font-bold">NETCO WiFi Vouchers</h2>
+        <h2 className="text-lg font-bold">TRAX LINK WiFi Vouchers</h2>
         <div className="grid grid-cols-3 gap-3">
           {vouchers.filter((v) => v.status === 'UNUSED').map((v) => (
             <div key={v.id} className="border border-black p-3 rounded">
-              <div className="text-xs font-bold">NETCO HOTSPOT</div>
+              <div className="text-xs font-bold">TRAX LINK HOTSPOT</div>
               <div className="font-mono text-base font-bold my-1">{v.code || v.codeMasked}</div>
               <div className="text-[11px]">
                 {v.packageName} · {formatTzs(v.priceTzs)} · 1 Device
@@ -258,7 +258,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
         </div>
       </div>
 
-      <div className="no-print bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+      <div className="no-print bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl overflow-hidden">
         {loading ? (
           <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Loading vouchers...</div>
         ) : vouchers.length === 0 ? (
@@ -304,7 +304,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
                           v.status === 'ACTIVE'
                             ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
                             : v.status === 'UNUSED'
-                            ? 'text-[#0284C7] dark:text-[#16B8FF] font-semibold'
+                            ? 'text-[#9A7B00] dark:text-[#FFD400] font-semibold'
                             : v.status === 'REVOKED'
                             ? 'text-red-600 dark:text-red-400 font-semibold'
                             : 'text-slate-500 dark:text-[#8793A5]'
@@ -316,7 +316,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
                     <td className="py-3 px-4 text-slate-600 dark:text-[#8793A5]">
                       <div>{v.customerName || v.batchId || 'Single Issue'}</div>
                       {v.boundDeviceName && (
-                        <div className="text-[11px] font-mono text-[#0284C7] dark:text-[#16B8FF]">
+                        <div className="text-[11px] font-mono text-[#9A7B00] dark:text-[#FFD400]">
                           Locked: {v.boundDeviceName}
                         </div>
                       )}
@@ -358,7 +358,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
       {/* Generate Batch Modal */}
       {genOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">Generate Vouchers</h3>
               <button
@@ -377,7 +377,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
                   required
                   value={packageId}
                   onChange={(e) => setPackageId(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 >
                   {packages.length === 0 && <option value="">Create a package first</option>}
                   {packages.map((p) => (
@@ -396,7 +396,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
                   required
                   value={count}
                   onChange={(e) => setCount(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                 />
               </div>
               <div>
@@ -404,7 +404,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
                 <select
                   value={customerId}
                   onChange={(e) => setCustomerId(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 >
                   <option value="">Walk-in / General Batch</option>
                   {customers.map((c) => (
@@ -457,7 +457,7 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
       {/* Redemption History Modal */}
       {redemptionsModal && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-lg w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+          <div className="max-w-lg w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-base font-semibold">Voucher Redemption History</h3>

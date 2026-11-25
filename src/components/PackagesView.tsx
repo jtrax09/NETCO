@@ -3,16 +3,22 @@ import { Plus, X } from 'lucide-react';
 import { apiRequest, formatDurationMinutes, formatSpeed, formatTzs } from '../lib/api.ts';
 import { syncPublicPackageToFirestore } from '../lib/firebase.ts';
 
+type PackageType = 'TIME_BASED' | 'DATA_BASED' | 'HYBRID' | 'BANDWIDTH_PROFILE';
+
 interface PackageItem {
   id: string;
   name: string;
   description: string | null;
   category: 'HOURLY' | 'DAILY' | 'WEEKLY' | 'MONTHLY';
+  packageType?: PackageType;
   priceTzs: number;
   durationMinutes: number;
   downloadKbps: number;
   uploadKbps: number;
   dataLimitMb: number | null;
+  deviceLimit?: number;
+  simultaneousSessions?: number;
+  fupPolicy?: string | null;
   validityDays: number;
   isActive: number;
 }
@@ -33,11 +39,15 @@ export function PackagesView({ token, canManage }: Props) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<'HOURLY' | 'DAILY' | 'WEEKLY' | 'MONTHLY'>('DAILY');
+  const [packageType, setPackageType] = useState<PackageType>('TIME_BASED');
   const [priceTzs, setPriceTzs] = useState('2000');
   const [durationMinutes, setDurationMinutes] = useState('1440');
   const [downloadKbps, setDownloadKbps] = useState('10000');
   const [uploadKbps, setUploadKbps] = useState('5000');
   const [dataLimitMb, setDataLimitMb] = useState('');
+  const [deviceLimit, setDeviceLimit] = useState('1');
+  const [simultaneousSessions, setSimultaneousSessions] = useState('1');
+  const [fupPolicy, setFupPolicy] = useState('');
   const [validityDays, setValidityDays] = useState('30');
   const [saving, setSaving] = useState(false);
 
@@ -62,11 +72,15 @@ export function PackagesView({ token, canManage }: Props) {
     setName('');
     setDescription('');
     setCategory('DAILY');
+    setPackageType('TIME_BASED');
     setPriceTzs('2000');
     setDurationMinutes('1440');
     setDownloadKbps('10000');
     setUploadKbps('5000');
     setDataLimitMb('');
+    setDeviceLimit('1');
+    setSimultaneousSessions('1');
+    setFupPolicy('');
     setValidityDays('30');
     setModalOpen(true);
   };
@@ -76,11 +90,15 @@ export function PackagesView({ token, canManage }: Props) {
     setName(pkg.name);
     setDescription(pkg.description || '');
     setCategory(pkg.category);
+    setPackageType(pkg.packageType || 'TIME_BASED');
     setPriceTzs(String(pkg.priceTzs));
     setDurationMinutes(String(pkg.durationMinutes));
     setDownloadKbps(String(pkg.downloadKbps));
     setUploadKbps(String(pkg.uploadKbps));
     setDataLimitMb(pkg.dataLimitMb ? String(pkg.dataLimitMb) : '');
+    setDeviceLimit(String(pkg.deviceLimit ?? 1));
+    setSimultaneousSessions(String(pkg.simultaneousSessions ?? 1));
+    setFupPolicy(pkg.fupPolicy || '');
     setValidityDays(String(pkg.validityDays));
     setModalOpen(true);
   };
@@ -104,11 +122,15 @@ export function PackagesView({ token, canManage }: Props) {
         name,
         description: description || null,
         category,
+        packageType,
         priceTzs: Number(priceTzs),
         durationMinutes: Number(durationMinutes),
         downloadKbps: Number(downloadKbps),
         uploadKbps: Number(uploadKbps),
         dataLimitMb: dataLimitMb.trim() ? Number(dataLimitMb) : null,
+        deviceLimit: Math.max(1, Number(deviceLimit) || 1),
+        simultaneousSessions: Math.max(1, Number(simultaneousSessions) || 1),
+        fupPolicy: fupPolicy.trim() || null,
         validityDays: Number(validityDays),
       };
       const res = editing
@@ -192,7 +214,7 @@ export function PackagesView({ token, canManage }: Props) {
       {loading ? (
         <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Loading packages...</div>
       ) : visible.length === 0 ? (
-        <div className="p-10 bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl text-center space-y-2">
+        <div className="p-10 bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl text-center space-y-2">
           <p className="text-sm font-medium">No WiFi packages configured</p>
           <p className="text-xs text-slate-500 dark:text-[#8793A5]">
             Create hourly, daily, weekly, or monthly hotspot plans priced in TZS with download/upload speed limits.
@@ -203,26 +225,31 @@ export function PackagesView({ token, canManage }: Props) {
           {visible.map((pkg) => (
             <div
               key={pkg.id}
-              className="p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 flex flex-col justify-between space-y-4"
+              className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 flex flex-col justify-between space-y-4"
             >
               <div>
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <p className="text-xs text-slate-500 dark:text-[#8793A5]">
-                      {pkg.category} · {pkg.isActive ? 'Active' : 'Inactive'}
+                      {pkg.category} · {(pkg.packageType || 'TIME_BASED').replace('_', ' ')} · {pkg.isActive ? 'Active' : 'Inactive'}
                     </p>
                     <h3 className="text-base font-bold mt-0.5">{pkg.name}</h3>
                   </div>
-                  <p className="font-mono font-bold text-base tabular-nums text-[#0284C7] dark:text-[#16B8FF]">
+                  <p className="font-mono font-bold text-base tabular-nums text-[#9A7B00] dark:text-[#FFD400]">
                     {formatTzs(pkg.priceTzs)}
                   </p>
                 </div>
                 {pkg.description && (
                   <p className="text-xs text-slate-500 dark:text-[#8793A5] mt-2">{pkg.description}</p>
                 )}
+                {pkg.fupPolicy && (
+                  <p className="text-[11px] font-mono text-amber-600 dark:text-amber-400 mt-1">
+                    FUP: {pkg.fupPolicy}
+                  </p>
+                )}
               </div>
 
-              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 grid grid-cols-2 gap-2 text-xs tabular-nums">
+              <div className="pt-3 border-t border-stone-100 dark:border-white/10 grid grid-cols-2 gap-2 text-xs tabular-nums">
                 <div>
                   <span className="text-slate-500 dark:text-[#8793A5]">Duration: </span>
                   <span className="font-mono font-medium">{formatDurationMinutes(pkg.durationMinutes)}</span>
@@ -240,6 +267,14 @@ export function PackagesView({ token, canManage }: Props) {
                 <div>
                   <span className="text-slate-500 dark:text-[#8793A5]">Upload: </span>
                   <span className="font-mono font-medium">{formatSpeed(pkg.uploadKbps)}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 dark:text-[#8793A5]">Devices: </span>
+                  <span className="font-mono font-medium">{pkg.deviceLimit ?? 1}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 dark:text-[#8793A5]">Sessions: </span>
+                  <span className="font-mono font-medium">{pkg.simultaneousSessions ?? 1}</span>
                 </div>
               </div>
 
@@ -268,7 +303,7 @@ export function PackagesView({ token, canManage }: Props) {
 
       {modalOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-lg w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="max-w-lg w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">{editing ? 'Edit WiFi Package' : 'Create WiFi Package'}</h3>
               <button
@@ -281,7 +316,7 @@ export function PackagesView({ token, canManage }: Props) {
               </button>
             </div>
             <form onSubmit={handleSave} className="space-y-3.5 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-medium mb-1">Package Name</label>
                   <input
@@ -290,7 +325,7 @@ export function PackagesView({ token, canManage }: Props) {
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="24H Express Fiber"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                   />
                 </div>
                 <div>
@@ -298,12 +333,25 @@ export function PackagesView({ token, canManage }: Props) {
                   <select
                     value={category}
                     onChange={(e) => applyCategoryPreset(e.target.value as 'HOURLY' | 'DAILY' | 'WEEKLY' | 'MONTHLY')}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                   >
                     <option value="HOURLY">Hourly</option>
                     <option value="DAILY">Daily</option>
                     <option value="WEEKLY">Weekly</option>
                     <option value="MONTHLY">Monthly</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Policy Type</label>
+                  <select
+                    value={packageType}
+                    onChange={(e) => setPackageType(e.target.value as PackageType)}
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
+                  >
+                    <option value="TIME_BASED">Time Based</option>
+                    <option value="DATA_BASED">Data Based</option>
+                    <option value="HYBRID">Hybrid (Time + Data)</option>
+                    <option value="BANDWIDTH_PROFILE">Bandwidth Profile</option>
                   </select>
                 </div>
               </div>
@@ -315,7 +363,7 @@ export function PackagesView({ token, canManage }: Props) {
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="High-speed wireless access for 1 device"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 />
               </div>
 
@@ -328,7 +376,7 @@ export function PackagesView({ token, canManage }: Props) {
                     required
                     value={priceTzs}
                     onChange={(e) => setPriceTzs(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
                 <div>
@@ -339,7 +387,7 @@ export function PackagesView({ token, canManage }: Props) {
                     required
                     value={durationMinutes}
                     onChange={(e) => setDurationMinutes(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
                 <div>
@@ -350,7 +398,7 @@ export function PackagesView({ token, canManage }: Props) {
                     required
                     value={downloadKbps}
                     onChange={(e) => setDownloadKbps(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
                 <div>
@@ -361,7 +409,7 @@ export function PackagesView({ token, canManage }: Props) {
                     required
                     value={uploadKbps}
                     onChange={(e) => setUploadKbps(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
                 <div>
@@ -372,7 +420,7 @@ export function PackagesView({ token, canManage }: Props) {
                     value={dataLimitMb}
                     onChange={(e) => setDataLimitMb(e.target.value)}
                     placeholder="Unlimited"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
                 <div>
@@ -383,9 +431,43 @@ export function PackagesView({ token, canManage }: Props) {
                     required
                     value={validityDays}
                     onChange={(e) => setValidityDays(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
+                <div>
+                  <label className="block font-medium mb-1">Device Limit</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    required
+                    value={deviceLimit}
+                    onChange={(e) => setDeviceLimit(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Simultaneous Sessions</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    required
+                    value={simultaneousSessions}
+                    onChange={(e) => setSimultaneousSessions(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block font-medium mb-1">Fair Usage Policy (Optional)</label>
+                <input
+                  type="text"
+                  value={fupPolicy}
+                  onChange={(e) => setFupPolicy(e.target.value)}
+                  placeholder="e.g. Throttle to 2 Mbps after 20 GB"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
+                />
               </div>
 
               <div className="flex justify-end gap-2.5 pt-2">

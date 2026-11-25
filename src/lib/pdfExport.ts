@@ -13,7 +13,7 @@ export function exportVouchersPdf(
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(16);
-  doc.text('NETCO — Hotspot Voucher Sheet', 40, 44);
+  doc.text('TRAX LINK — Hotspot Voucher Sheet', 40, 44);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
   doc.text(`Generated: ${new Date().toLocaleString()} · Maximum 1 Device Per Voucher`, 40, 62);
@@ -34,7 +34,7 @@ export function exportVouchersPdf(
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10);
-    doc.text('NETCO WiFi Access', x + 12, y + 18);
+    doc.text('TRAX LINK WiFi Access', x + 12, y + 18);
 
     doc.setFont('courier', 'bold');
     doc.setFontSize(13);
@@ -53,7 +53,7 @@ export function exportVouchersPdf(
     }
   });
 
-  doc.save('netco-vouchers.pdf');
+  doc.save('traxlink-vouchers.pdf');
 }
 
 export function exportReportPdf(params: {
@@ -66,7 +66,7 @@ export function exportReportPdf(params: {
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(15);
-  doc.text(`NETCO — ${params.title}`, 40, 44);
+  doc.text(`TRAX LINK — ${params.title}`, 40, 44);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
   doc.text(`${params.subtitle} · Generated ${new Date().toLocaleString()}`, 40, 62);

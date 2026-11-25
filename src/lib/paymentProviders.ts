@@ -1,9 +1,9 @@
-export type MobileMoneyProviderKey = 'MPESA' | 'AIRTEL_MONEY' | 'TIGO_PESA' | 'HALOPESA';
+export type MobileMoneyProviderKey = 'MPESA' | 'AIRTEL_MONEY' | 'TIGO_PESA' | 'HALOPESA' | 'CARD';
 
 export interface ProviderBrandMeta {
   key: MobileMoneyProviderKey;
   label: string;
-  logoUrl: string;
+  logoUrl: string | null;
   alt: string;
 }
 
@@ -31,6 +31,12 @@ export const PAYMENT_PROVIDER_BRANDS: Record<MobileMoneyProviderKey, ProviderBra
     label: 'HaloPesa',
     logoUrl: '/assets/aistudio/halopesa_logo.png',
     alt: 'HaloPesa Tanzania',
+  },
+  CARD: {
+    key: 'CARD',
+    label: 'Visa / Mastercard',
+    logoUrl: null,
+    alt: 'Bank Card Checkout',
   },
 };
 

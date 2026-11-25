@@ -88,10 +88,10 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
       <div className="space-y-6">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-28 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 animate-pulse" />
+            <div key={i} className="h-28 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 animate-pulse" />
           ))}
         </div>
-        <div className="h-72 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 animate-pulse" />
+        <div className="h-72 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 animate-pulse" />
       </div>
     );
   }
@@ -116,7 +116,7 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
     <div className="space-y-6">
       {/* Primary KPI Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <div className="p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800">
+        <div className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10">
           <p className="text-xs font-medium text-slate-500 dark:text-[#8793A5]">Customers</p>
           <p className="text-2xl font-bold tabular-nums mt-2">{stats.totalCustomers}</p>
           <p className="text-xs text-slate-500 dark:text-[#8793A5] mt-2 tabular-nums">
@@ -126,7 +126,7 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
           </p>
         </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800">
+        <div className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10">
           <p className="text-xs font-medium text-slate-500 dark:text-[#8793A5]">Vouchers</p>
           <p className="text-2xl font-bold tabular-nums mt-2">{stats.activeVouchers + stats.unusedVouchers}</p>
           <p className="text-xs text-slate-500 dark:text-[#8793A5] mt-2 tabular-nums">
@@ -135,9 +135,9 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
           </p>
         </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800">
+        <div className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10">
           <p className="text-xs font-medium text-slate-500 dark:text-[#8793A5]">Monthly Verified Revenue</p>
-          <p className="text-2xl font-bold tabular-nums mt-2 text-[#0284C7] dark:text-[#16B8FF]">
+          <p className="text-2xl font-bold tabular-nums mt-2 text-[#9A7B00] dark:text-[#FFD400]">
             {formatTzs(stats.monthlyRevenueTzs)}
           </p>
           <p className="text-xs text-slate-500 dark:text-[#8793A5] mt-2 tabular-nums">
@@ -145,7 +145,7 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
           </p>
         </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800">
+        <div className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10">
           <p className="text-xs font-medium text-slate-500 dark:text-[#8793A5]">Network Bandwidth</p>
           <p className="text-2xl font-bold tabular-nums mt-2">
             {formatBytes(stats.totalRxBytes + stats.totalTxBytes)}
@@ -158,7 +158,7 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
 
       {/* Analytics Row */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-7 p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800">
+        <div className="lg:col-span-7 p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10">
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-sm font-semibold">7-Day Verified Revenue (TZS)</h3>
@@ -182,25 +182,25 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
             <div className="h-56">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={dailySeries}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.25} />
-                  <XAxis dataKey="day" tick={{ fontSize: 11, fill: '#8793A5' }} />
-                  <YAxis tick={{ fontSize: 11, fill: '#8793A5' }} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272A" opacity={0.45} />
+                  <XAxis dataKey="day" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#101827',
-                      borderColor: '#1e293b',
+                      backgroundColor: '#161618',
+                      borderColor: '#27272A',
                       color: '#ffffff',
                       fontSize: '12px',
                     }}
                   />
-                  <Bar dataKey="revenueTzs" fill="#16B8FF" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="revenueTzs" fill="#FFD400" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
           )}
         </div>
 
-        <div className="lg:col-span-5 p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800">
+        <div className="lg:col-span-5 p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10">
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-sm font-semibold">Voucher Inventory</h3>
@@ -217,18 +217,18 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={voucherDistribution}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.25} />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#8793A5' }} />
-                <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#8793A5' }} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#27272A" opacity={0.45} />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#9CA3AF' }} />
                 <Tooltip
                   contentStyle={{
-                    backgroundColor: '#101827',
-                    borderColor: '#1e293b',
+                    backgroundColor: '#161618',
+                    borderColor: '#27272A',
                     color: '#ffffff',
                     fontSize: '12px',
                   }}
                 />
-                <Bar dataKey="count" fill="#16B8FF" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="count" fill="#FFD400" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -237,7 +237,7 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
 
       {/* Router Health & Recent Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-6 p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 space-y-4">
+        <div className="lg:col-span-6 p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold">MikroTik Router Health</h3>
             <button
@@ -254,12 +254,12 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
                 <span className="text-xs font-mono font-semibold text-amber-600 dark:text-amber-400">
                   No MikroTik router connected
                 </span>
-                <span className="px-2 py-0.5 rounded bg-[#16B8FF]/15 text-[#0284C7] dark:text-[#16B8FF] text-[11px] font-mono font-semibold">
+                <span className="px-2 py-0.5 rounded bg-[#FFD400]/15 text-[#9A7B00] dark:text-[#FFD400] text-[11px] font-mono font-semibold">
                   {data.operatingMode === 'MIKROTIK_MODE' ? 'MikroTik Mode' : 'Standalone Mode'}
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-[#8793A5]">
-                NETCO is running natively in Standalone Mode. Connect a MikroTik RouterOS device optionally when hardware is available.
+                TRAX LINK is running natively in Standalone Mode. Connect a MikroTik RouterOS device optionally when hardware is available.
               </p>
               <button
                 type="button"
@@ -299,7 +299,7 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
           )}
         </div>
 
-        <div className="lg:col-span-6 p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 space-y-4">
+        <div className="lg:col-span-6 p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold">Recent System Activities</h3>
             <button

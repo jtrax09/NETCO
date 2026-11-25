@@ -185,7 +185,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search name, phone, ID..."
-              className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#101827] focus:outline-none focus:border-[#16B8FF]"
+              className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-stone-200 dark:border-white/10 bg-white dark:bg-[#161618] focus:outline-none focus:border-[#FFD400]"
             />
           </form>
 
@@ -221,7 +221,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
         </div>
       )}
 
-      <div className="bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+      <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl overflow-hidden">
         {loading ? (
           <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Loading customers...</div>
         ) : customers.length === 0 ? (
@@ -252,7 +252,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
                       <button
                         type="button"
                         onClick={() => openProfile(c.id)}
-                        className="font-semibold text-slate-900 dark:text-white hover:text-[#16B8FF] text-left"
+                        className="font-semibold text-slate-900 dark:text-white hover:text-[#9A7B00] dark:hover:text-[#FFD400] text-left"
                       >
                         {c.full_name}
                       </button>
@@ -324,7 +324,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
       {/* Create / Edit Modal */}
       {modalOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">{editing ? 'Edit Customer' : 'Add Customer'}</h3>
               <button
@@ -344,7 +344,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
                   required
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 />
               </div>
               <div>
@@ -355,7 +355,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
                   placeholder="0754123456"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                 />
               </div>
               <div>
@@ -364,7 +364,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 />
               </div>
               <div>
@@ -372,7 +372,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
                 <select
                   value={packageId}
                   onChange={(e) => setPackageId(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 >
                   <option value="">None</option>
                   {packages.map((p) => (
@@ -388,7 +388,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
                   rows={2}
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 />
               </div>
               <div className="flex justify-end gap-2.5 pt-2">
@@ -415,10 +415,10 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
       {/* Customer Profile Drawer */}
       {profile && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end">
-          <div className="max-w-lg w-full h-full bg-white dark:bg-[#101827] border-l border-slate-200 dark:border-slate-800 p-6 overflow-y-auto space-y-6">
+          <div className="max-w-lg w-full h-full bg-white dark:bg-[#161618] border-l border-stone-200 dark:border-white/10 p-6 overflow-y-auto space-y-6">
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-xs font-mono text-[#16B8FF]">{profile.customer.customer_code}</p>
+                <p className="text-xs font-mono text-[#9A7B00] dark:text-[#FFD400]">{profile.customer.customer_code}</p>
                 <h3 className="text-lg font-bold mt-0.5">{profile.customer.full_name}</h3>
                 <p className="text-xs text-slate-500 dark:text-[#8793A5] font-mono">
                   {profile.customer.phone} {profile.customer.email ? `· ${profile.customer.email}` : ''}
@@ -434,7 +434,7 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
               </button>
             </div>
 
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-[#080B12] border border-slate-200 dark:border-slate-800 text-xs space-y-1">
+            <div className="p-4 rounded-xl bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10 text-xs space-y-1">
               <div className="flex justify-between">
                 <span className="text-slate-500 dark:text-[#8793A5]">Assigned Package</span>
                 <span className="font-medium">{profile.customer.package_name || 'None'}</span>

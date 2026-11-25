@@ -1,5 +1,5 @@
-// NETCO Network Management System — Normalized PostgreSQL Schema (Prisma)
-// Mirrors the operational schema for Docker / PostgreSQL production deployments.
+// TRAX LINK Multi-Tenant SaaS WiFi Billing & MikroTik Platform — PostgreSQL Schema (Prisma)
+// Mirrors the operational schema for Docker / PostgreSQL production deployments with RLS.
 
 generator client {
   provider = "prisma-client-js"
@@ -12,9 +12,18 @@ datasource db {
 
 enum StaffRole {
   SUPER_ADMIN
+  BUSINESS_OWNER
   ADMIN
+  ACCOUNTANT
   NETWORK_OPERATOR
+  SUPPORT_STAFF
   CASHIER
+}
+
+enum BusinessStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
 }
 
 enum PackageCategory {
@@ -22,6 +31,13 @@ enum PackageCategory {
   DAILY
   WEEKLY
   MONTHLY
+}
+
+enum PackageType {
+  TIME_BASED
+  DATA_BASED
+  HYBRID
+  BANDWIDTH_PROFILE
 }
 
 enum VoucherStatus {
@@ -37,12 +53,27 @@ enum SessionStatus {
   TERMINATED
 }
 
+enum SubscriptionStatus {
+  PENDING_PROVISIONING
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+}
+
+enum ProvisioningStatus {
+  PENDING
+  STANDALONE
+  PROVISIONED
+  FAILED_RETRYING
+}
+
 enum PaymentProvider {
   MPESA
   AIRTEL_MONEY
   TIGO_PESA
   HALOPESA
   CASH_DESK
+  CARD
 }
 
 enum PaymentStatus {
@@ -63,113 +94,256 @@ enum NotificationType {
   VOUCHER_EXPIRED
   PAYMENT_SUCCESS
   PAYMENT_FAILED
+  STANDALONE_TOKEN_ISSUED
   ROUTER_OFFLINE
   ROUTER_ONLINE
   SUSPICIOUS_ACTIVITY
   NETWORK_ALERT
+  PROVISIONING_RETRY
+  SUPPORT_TICKET
+  SECURITY
+}
+
+model SaasPlan {
+  id                  String   @id @default(cuid())
+  code                String   @unique
+  name                String
+  priceMonthlyTzs     Int
+  priceYearlyTzs      Int
+  maxRouters          Int
+  maxLocations        Int
+  maxActiveCustomers  Int
+  commissionBps       Int      @default(0)
+  featuresJson        Json?
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  subscriptions SaasSubscription[]
+}
+
+model Business {
+  id                  String         @id @default(cuid())
+  name                String
+  slug                String         @unique
+  email               String
+  phone               String
+  country             String         @default("Tanzania")
+  currency            String         @default("TZS")
+  status              BusinessStatus @default(ACTIVE)
+  timezone            String         @default("Africa/Dar_es_Salaam")
+  hotspotTitle        String?
+  hotspotSupportPhone String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  adminUsers        AdminUser[]
+  staff             Staff[]
+  locations         Location[]
+  packages          Package[]
+  customers         Customer[]
+  devices           Device[]
+  routers           Router[]
+  vouchers          Voucher[]
+  sessions          Session[]
+  payments          Payment[]
+  subscriptions     Subscription[]
+  provisioningJobs  ProvisioningJob[]
+  radChecks         RadCheck[]
+  radReplies        RadReply[]
+  radAccts          RadAcct[]
+  supportTickets    SupportTicket[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  saasSubscriptions SaasSubscription[]
+  saasPayments      SaasPayment[]
+
+  @@index([status])
+}
+
+model SaasSubscription {
+  id                 String   @id @default(cuid())
+  businessId         String
+  planId             String
+  status             String   @default("TRIAL")
+  billingCycle       String   @default("MONTHLY")
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  business Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  plan     SaasPlan      @relation(fields: [planId], references: [id], onDelete: Restrict)
+  payments SaasPayment[]
+
+  @@index([businessId, status])
+}
+
+model SaasPayment {
+  id                 String        @id @default(cuid())
+  businessId         String
+  saasSubscriptionId String
+  reference          String        @unique
+  amountTzs          Int
+  provider           String
+  status             PaymentStatus @default(PENDING)
+  paidAt             DateTime?
+  createdAt          DateTime      @default(now())
+
+  business         Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  saasSubscription SaasSubscription @relation(fields: [saasSubscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, createdAt])
+}
+
+model Location {
+  id          String   @id @default(cuid())
+  businessId  String
+  name        String
+  region      String
+  address     String?
+  contactName String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  routers       Router[]
+  packages      Package[]
+  subscriptions Subscription[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
 }
 
 model AdminUser {
-  id           String   @id @default(cuid())
-  firebaseUid  String?  @unique
-  email        String   @unique
+  id           String    @id @default(cuid())
+  businessId   String
+  firebaseUid  String?   @unique
+  email        String    @unique
   fullName     String
   passwordHash String?
   role         StaffRole @default(ADMIN)
-  isActive     Boolean  @default(true)
+  isActive     Boolean   @default(true)
   lastLoginAt  DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  staffProfile Staff?
-  auditLogs    AuditLog[]
-}
-
-model Staff {
-  id           String    @id @default(cuid())
-  adminUserId  String    @unique
-  staffCode    String    @unique
-  department   String
-  phone        String?
-  role         StaffRole
-  isSuspended  Boolean   @default(false)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
+  business     Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  staffProfile Staff?
+  auditLogs    AuditLog[]
+
+  @@index([businessId])
+}
+
+model Staff {
+  id          String    @id @default(cuid())
+  businessId  String
+  adminUserId String    @unique
+  staffCode   String    @unique
+  department  String
+  phone       String?
+  role        StaffRole
+  isSuspended Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  business  Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
   adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
 
-  @@index([role])
+  @@index([businessId, role])
 }
 
 model Customer {
-  id            String   @id @default(cuid())
-  customerCode  String   @unique
-  fullName      String
-  phone         String
-  email         String?
-  notes         String?
-  isActive      Boolean  @default(true)
-  packageId     String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id           String   @id @default(cuid())
+  businessId   String
+  customerCode String   @unique
+  fullName     String
+  phone        String
+  email        String?
+  notes        String?
+  isActive     Boolean  @default(true)
+  packageId    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  assignedPackage Package? @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  business        Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  assignedPackage Package?        @relation(fields: [packageId], references: [id], onDelete: SetNull)
   vouchers        Voucher[]
   sessions        Session[]
   devices         Device[]
   payments        Payment[]
+  subscriptions   Subscription[]
+  supportTickets  SupportTicket[]
 
-  @@index([phone])
-  @@index([isActive])
+  @@index([businessId, phone])
+  @@index([businessId, isActive])
 }
 
 model Package {
-  id              String          @id @default(cuid())
-  name            String          @unique
-  description     String?
-  category        PackageCategory
-  priceTzs        Int
-  durationMinutes Int
-  downloadKbps    Int
-  uploadKbps      Int
-  dataLimitMb     Int?
-  validityDays    Int             @default(30)
-  isActive        Boolean         @default(true)
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
+  id                   String          @id @default(cuid())
+  businessId           String
+  locationId           String?
+  name                 String
+  description          String?
+  category             PackageCategory
+  packageType          PackageType     @default(TIME_BASED)
+  priceTzs             Int
+  currency             String          @default("TZS")
+  durationMinutes      Int
+  downloadKbps         Int
+  uploadKbps           Int
+  dataLimitMb          Int?
+  deviceLimit          Int             @default(1)
+  simultaneousSessions Int             @default(1)
+  fupPolicy            String?
+  validityDays         Int             @default(30)
+  isActive             Boolean         @default(true)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
 
-  customers Customer[]
-  vouchers  Voucher[]
-  payments  Payment[]
+  business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location      Location?      @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  customers     Customer[]
+  vouchers      Voucher[]
+  payments      Payment[]
+  subscriptions Subscription[]
 
-  @@index([isActive, category])
+  @@unique([businessId, name])
+  @@index([businessId, isActive, category])
 }
 
 model Voucher {
-  id            String        @id @default(cuid())
-  codeHash      String        @unique
-  codeEncrypted String
-  codeMasked    String
-  batchId       String?
-  packageId     String
-  customerId    String?
-  status        VoucherStatus @default(UNUSED)
-  boundDeviceId String?
-  activatedAt   DateTime?
-  expiresAt     DateTime?
-  revokedAt     DateTime?
-  revokedReason String?
-  createdById   String?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  id              String        @id @default(cuid())
+  businessId      String
+  codeHash        String        @unique
+  codeEncrypted   String
+  codeMasked      String
+  batchId         String?
+  packageId       String
+  customerId      String?
+  status          VoucherStatus @default(UNUSED)
+  boundDeviceId   String?
+  boundDeviceName String?
+  isTest          Boolean       @default(false)
+  testNote        String?
+  activatedAt     DateTime?
+  expiresAt       DateTime?
+  revokedAt       DateTime?
+  revokedReason   String?
+  createdById     String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
-  package     Package             @relation(fields: [packageId], references: [id], onDelete: Restrict)
-  customer    Customer?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  redemptions VoucherRedemption[]
-  sessions    Session[]
-  payments    Payment[]
+  business      Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  package       Package             @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  customer      Customer?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  redemptions   VoucherRedemption[]
+  sessions      Session[]
+  payments      Payment[]
+  subscriptions Subscription[]
 
-  @@index([status])
+  @@index([businessId, status])
   @@index([batchId])
   @@index([packageId])
 }
@@ -191,6 +365,7 @@ model VoucherRedemption {
 
 model Device {
   id                String   @id @default(cuid())
+  businessId        String
   deviceFingerprint String   @unique
   macAddress        String?
   userAgent         String?
@@ -199,72 +374,88 @@ model Device {
   firstSeenAt       DateTime @default(now())
   lastSeenAt        DateTime @default(now())
 
+  business    Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
   customer    Customer?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
   redemptions VoucherRedemption[]
   sessions    Session[]
+
+  @@index([businessId])
 }
 
 model Session {
-  id            String        @id @default(cuid())
-  sessionToken  String        @unique
-  voucherId     String
-  deviceId      String
-  customerId    String?
-  routerId      String?
-  ipAddress     String?
-  status        SessionStatus @default(ACTIVE)
-  bytesIn       BigInt        @default(0)
-  bytesOut      BigInt        @default(0)
-  startedAt     DateTime      @default(now())
-  expiresAt     DateTime
-  endedAt       DateTime?
-  endReason     String?
+  id           String        @id @default(cuid())
+  businessId   String
+  sessionToken String        @unique
+  voucherId    String
+  deviceId     String
+  customerId   String?
+  routerId     String?
+  ipAddress    String?
+  status       SessionStatus @default(ACTIVE)
+  bytesIn      BigInt        @default(0)
+  bytesOut     BigInt        @default(0)
+  startedAt    DateTime      @default(now())
+  expiresAt    DateTime
+  endedAt      DateTime?
+  endReason    String?
 
+  business     Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
   voucher      Voucher        @relation(fields: [voucherId], references: [id], onDelete: Cascade)
   device       Device         @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   customer     Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
   router       Router?        @relation(fields: [routerId], references: [id], onDelete: SetNull)
   networkUsage NetworkUsage[]
 
-  @@index([status, expiresAt])
+  @@index([businessId, status, expiresAt])
   @@index([voucherId, status])
 }
 
 model Payment {
-  id                String          @id @default(cuid())
-  reference         String          @unique
-  receiptNumber     String?         @unique
-  provider          PaymentProvider
-  phoneNumber       String
-  amountTzs         Int
-  status            PaymentStatus   @default(PENDING)
-  externalTxId      String?         @unique
-  packageId         String
-  customerId        String?
-  voucherId         String?
-  providerPayload   Json?
-  verifiedAt        DateTime?
-  refundedAt        DateTime?
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+  id              String          @id @default(cuid())
+  businessId      String
+  reference       String          @unique
+  receiptNumber   String?         @unique
+  provider        PaymentProvider
+  phoneNumber     String
+  amountTzs       Int
+  status          PaymentStatus   @default(PENDING)
+  isTest          Boolean         @default(false)
+  paymentMode     String          @default("GATEWAY")
+  externalTxId    String?         @unique
+  packageId       String
+  customerId      String?
+  voucherId       String?
+  providerPayload Json?
+  verifiedAt      DateTime?
+  refundedAt      DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 
-  package  Package   @relation(fields: [packageId], references: [id], onDelete: Restrict)
-  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  voucher  Voucher?  @relation(fields: [voucherId], references: [id], onDelete: SetNull)
+  business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  package       Package        @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  customer      Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  voucher       Voucher?       @relation(fields: [voucherId], references: [id], onDelete: SetNull)
+  subscriptions Subscription[]
 
-  @@index([status, createdAt])
+  @@index([businessId, status, createdAt])
   @@index([provider])
 }
 
 model Router {
   id                String       @id @default(cuid())
-  name              String       @unique
+  businessId        String
+  locationId        String?
+  name              String
   host              String
   apiPort           Int          @default(8728)
   useTls            Boolean      @default(false)
   username          String
   passwordEncrypted String
-  hotspotServer     String       @default("hotspot1")
+  hotspotServer     String       @default("")
+  routerOsFamily    String       @default("ROUTEROS_V7")
+  wireguardPubkey   String?
+  wireguardEndpoint String?
+  radiusSecret      String?
   status            RouterStatus @default(NOT_CONNECTED)
   cpuLoad           Int?
   memoryUsedBytes   BigInt?
@@ -277,11 +468,16 @@ model Router {
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
-  interfaces RouterInterface[]
-  sessions   Session[]
-  usageLogs  NetworkUsage[]
+  business         Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location         Location?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  interfaces       RouterInterface[]
+  sessions         Session[]
+  usageLogs        NetworkUsage[]
+  provisioningJobs ProvisioningJob[]
 
-  @@unique([host, apiPort])
+  @@unique([businessId, name])
+  @@unique([businessId, host, apiPort])
+  @@index([businessId, status])
 }
 
 model RouterInterface {
@@ -300,6 +496,129 @@ model RouterInterface {
   @@unique([routerId, name])
 }
 
+model Subscription {
+  id                 String             @id @default(cuid())
+  businessId         String
+  locationId         String?
+  customerId         String?
+  packageId          String
+  paymentId          String?
+  voucherId          String?
+  radiusUsername     String             @unique
+  status             SubscriptionStatus @default(PENDING_PROVISIONING)
+  provisioningStatus ProvisioningStatus @default(PENDING)
+  downloadKbps       Int
+  uploadKbps         Int
+  dataLimitMb        Int?
+  startsAt           DateTime
+  expiresAt          DateTime
+  revokedAt          DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  business         Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location         Location?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  customer         Customer?         @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  package          Package           @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  payment          Payment?          @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  voucher          Voucher?          @relation(fields: [voucherId], references: [id], onDelete: SetNull)
+  provisioningJobs ProvisioningJob[]
+
+  @@index([businessId, status, expiresAt])
+}
+
+model ProvisioningJob {
+  id             String   @id @default(cuid())
+  businessId     String
+  subscriptionId String
+  routerId       String?
+  action         String
+  status         String   @default("PENDING")
+  attempts       Int      @default(0)
+  maxAttempts    Int      @default(5)
+  lastError      String?
+  nextRetryAt    DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  router       Router?      @relation(fields: [routerId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, status, nextRetryAt])
+}
+
+model RadCheck {
+  id         String    @id @default(cuid())
+  businessId String
+  username   String
+  attribute  String
+  op         String    @default(":=")
+  value      String
+  expiresAt  DateTime?
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, username, attribute])
+  @@index([username, isActive])
+}
+
+model RadReply {
+  id         String   @id @default(cuid())
+  businessId String
+  username   String
+  attribute  String
+  op         String   @default(":=")
+  value      String
+  createdAt  DateTime @default(now())
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, username, attribute])
+  @@index([username])
+}
+
+model RadAcct {
+  id               String    @id @default(cuid())
+  businessId       String
+  acctSessionId    String    @unique
+  username         String
+  nasIpAddress     String?
+  framedIpAddress  String?
+  callingStationId String?
+  acctInputOctets  BigInt    @default(0)
+  acctOutputOctets BigInt    @default(0)
+  acctSessionTime  Int       @default(0)
+  acctStartTime    DateTime  @default(now())
+  acctStopTime     DateTime?
+  terminateCause   String?
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, username])
+}
+
+model SupportTicket {
+  id         String   @id @default(cuid())
+  businessId String
+  customerId String?
+  phone      String
+  subject    String
+  message    String
+  status     String   @default("OPEN")
+  reply      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, status])
+}
+
 model NetworkUsage {
   id         String   @id @default(cuid())
   routerId   String?
@@ -315,32 +634,37 @@ model NetworkUsage {
 }
 
 model Notification {
-  id        String           @id @default(cuid())
-  type      NotificationType
-  severity  String           @default("INFO")
-  title     String
-  message   String
-  metadata  Json?
-  isRead    Boolean          @default(false)
-  createdAt DateTime         @default(now())
+  id         String           @id @default(cuid())
+  businessId String
+  type       NotificationType
+  severity   String           @default("INFO")
+  title      String
+  message    String
+  metadata   Json?
+  isRead     Boolean          @default(false)
+  createdAt  DateTime         @default(now())
 
-  @@index([isRead, createdAt])
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, isRead, createdAt])
 }
 
 model AuditLog {
-  id          String   @id @default(cuid())
-  actorId     String?
-  actorEmail  String
-  actorRole   String
-  action      String
-  entityType  String
-  entityId    String?
-  ipAddress   String?
-  details     Json?
-  createdAt   DateTime @default(now())
+  id         String   @id @default(cuid())
+  businessId String?
+  actorId    String?
+  actorEmail String
+  actorRole  String
+  action     String
+  entityType String
+  entityId   String?
+  ipAddress  String?
+  details    Json?
+  createdAt  DateTime @default(now())
 
-  actor AdminUser? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  business Business?  @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  actor    AdminUser? @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
-  @@index([action, createdAt])
+  @@index([businessId, action, createdAt])
   @@index([actorEmail])
 }

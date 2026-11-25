@@ -1,3 +1,17 @@
+let activeTenantOverrideId: string | null = null;
+
+export function setActiveTenantId(tenantId: string | null) {
+  activeTenantOverrideId = tenantId && tenantId.trim() ? tenantId.trim() : null;
+}
+
+export function getActiveTenantId(): string | null {
+  return activeTenantOverrideId;
+}
+
+export function getTenantHeaders(): Record<string, string> {
+  return activeTenantOverrideId ? { 'x-tenant-id': activeTenantOverrideId } : {};
+}
+
 export async function apiRequest<T>(
   url: string,
   options: {
@@ -12,6 +26,7 @@ export async function apiRequest<T>(
     headers: {
       ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+      ...getTenantHeaders(),
       ...(options.headers ?? {}),
     },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,

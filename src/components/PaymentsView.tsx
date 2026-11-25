@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Receipt, RotateCcw, X } from 'lucide-react';
+import { CreditCard, Receipt, RotateCcw, X } from 'lucide-react';
 import { apiRequest, formatTzs } from '../lib/api.ts';
 import { getProviderBrand } from '../lib/paymentProviders.ts';
 
@@ -82,17 +82,21 @@ export function PaymentsView({ token, refreshTrigger, canRefund }: Props) {
           return (
             <div
               key={prov.provider}
-              className="p-4 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 space-y-2.5"
+              className="p-4 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-2.5"
             >
               <div className="flex items-center justify-between gap-2.5">
                 <div className="flex items-center gap-2.5 min-w-0">
-                  {brand && (
+                  {brand && brand.logoUrl ? (
                     <span className="w-10 h-9 rounded-lg bg-transparent overflow-hidden flex items-center justify-center shrink-0">
                       <img
                         src={brand.logoUrl}
                         alt={brand.alt}
                         className="w-full h-full object-contain"
                       />
+                    </span>
+                  ) : (
+                    <span className="w-10 h-9 rounded-lg bg-[#FFD400]/15 text-[#9A7B00] dark:text-[#FFD400] flex items-center justify-center shrink-0">
+                      <CreditCard className="w-4 h-4" />
                     </span>
                   )}
                   <span className="text-xs font-semibold truncate">{brand?.label || prov.displayName}</span>
@@ -140,7 +144,7 @@ export function PaymentsView({ token, refreshTrigger, canRefund }: Props) {
         </div>
       )}
 
-      <div className="bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+      <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl overflow-hidden">
         {loading ? (
           <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Loading payments...</div>
         ) : payments.length === 0 ? (
@@ -176,11 +180,15 @@ export function PaymentsView({ token, refreshTrigger, canRefund }: Props) {
                       <div className="flex items-center gap-2">
                         {(() => {
                           const brand = getProviderBrand(p.provider);
-                          return brand ? (
+                          return brand && brand.logoUrl ? (
                             <span className="w-7 h-6 rounded-md bg-transparent overflow-hidden flex items-center justify-center shrink-0">
                               <img src={brand.logoUrl} alt={brand.alt} className="w-full h-full object-contain" />
                             </span>
-                          ) : null;
+                          ) : (
+                            <span className="w-7 h-6 rounded-md bg-[#FFD400]/15 text-[#9A7B00] dark:text-[#FFD400] flex items-center justify-center shrink-0">
+                              <CreditCard className="w-3.5 h-3.5" />
+                            </span>
+                          );
                         })()}
                         <div>
                           <div>{getProviderBrand(p.provider)?.label || p.provider.replace('_', ' ')}</div>
@@ -249,9 +257,9 @@ export function PaymentsView({ token, refreshTrigger, canRefund }: Props) {
 
       {receiptModal && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-semibold">NETCO Payment Receipt</h3>
+              <h3 className="text-base font-semibold">TRAX LINK Payment Receipt</h3>
               <button
                 type="button"
                 onClick={() => setReceiptModal(null)}
@@ -261,7 +269,7 @@ export function PaymentsView({ token, refreshTrigger, canRefund }: Props) {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#080B12] border border-slate-200 dark:border-slate-800 space-y-2 text-xs font-mono">
+            <div className="p-4 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10 space-y-2 text-xs font-mono">
               <div className="flex justify-between">
                 <span className="text-slate-500">Reference</span>
                 <span>{receiptModal.reference}</span>

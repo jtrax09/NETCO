@@ -10,8 +10,9 @@ import {
   maskVoucherCode,
   sha256,
 } from '../utils/crypto.ts';
+import { provisionSubscriptionForActivation } from './billing.ts';
 
-export type MobileMoneyProvider = 'MPESA' | 'AIRTEL_MONEY' | 'TIGO_PESA' | 'HALOPESA';
+export type MobileMoneyProvider = 'MPESA' | 'AIRTEL_MONEY' | 'TIGO_PESA' | 'HALOPESA' | 'CARD';
 
 export interface ProviderStatus {
   provider: MobileMoneyProvider;
@@ -52,6 +53,12 @@ export function getProviderStatuses(): ProviderStatus[] {
       requiredEnv: ['HALOPESA_MERCHANT_CODE', 'HALOPESA_API_SECRET', 'HALOPESA_WEBHOOK_SECRET'],
       webhookPath: '/api/payments/webhook/HALOPESA',
     },
+    {
+      provider: 'CARD',
+      displayName: 'Visa / Mastercard Gateway',
+      requiredEnv: ['CARD_GATEWAY_KEY', 'CARD_WEBHOOK_SECRET'],
+      webhookPath: '/api/payments/webhook/CARD',
+    },
   ];
 
   return checks.map((c) => {
@@ -76,6 +83,8 @@ export function getWebhookSecret(provider: MobileMoneyProvider): string | null {
       return process.env.TIGO_WEBHOOK_SECRET?.trim() || null;
     case 'HALOPESA':
       return process.env.HALOPESA_WEBHOOK_SECRET?.trim() || null;
+    case 'CARD':
+      return process.env.CARD_WEBHOOK_SECRET?.trim() || null;
   }
 }
 
@@ -122,39 +131,53 @@ export function initiatePayment(
     provider: MobileMoneyProvider;
     phoneNumber: string;
     customerId?: string | null;
+    businessId?: string | null;
   }
 ) {
-  const normalizedPhone = normalizeTanzaniaPhone(params.phoneNumber);
-  if (!normalizedPhone) {
-    throw new Error('Enter a valid Tanzanian mobile money number (e.g. 0712345678 or 255712345678).');
+  let contactValue = params.phoneNumber.trim();
+  if (params.provider !== 'CARD') {
+    const normalizedPhone = normalizeTanzaniaPhone(params.phoneNumber);
+    if (!normalizedPhone) {
+      throw new Error('Enter a valid Tanzanian mobile money number (e.g. 0712345678 or 255712345678).');
+    }
+    contactValue = normalizedPhone;
+  } else if (contactValue.length < 4) {
+    throw new Error('Enter a valid cardholder phone or billing email.');
   }
 
   const pkg = db
-    .prepare('SELECT id, name, price_tzs, is_active FROM packages WHERE id = ?')
-    .get(params.packageId) as { id: string; name: string; price_tzs: number; is_active: number } | undefined;
+    .prepare('SELECT id, business_id, name, price_tzs, is_active FROM packages WHERE id = ?')
+    .get(params.packageId) as
+    | { id: string; business_id: string; name: string; price_tzs: number; is_active: number }
+    | undefined;
 
   if (!pkg || !pkg.is_active) {
     throw new Error('Selected package is unavailable.');
   }
+  if (params.businessId && pkg.business_id !== params.businessId) {
+    throw new Error('Selected package does not belong to the chosen WiFi provider workspace.');
+  }
 
+  const businessId = pkg.business_id;
   const providerInfo = getProviderStatuses().find((p) => p.provider === params.provider);
   const providerConfigured = Boolean(providerInfo?.configured);
   const paymentMode = providerConfigured ? 'GATEWAY' : 'STANDALONE_TEST';
   const isTest = providerConfigured ? 0 : 1;
   const paymentId = generateId('pay');
-  const reference = generateReference('NTC-PAY');
+  const reference = generateReference('TRX-PAY');
   const nowIso = new Date().toISOString();
 
   db.prepare(`
     INSERT INTO payments (
-      id, reference, provider, phone_number, amount_tzs, status,
+      id, business_id, reference, provider, phone_number, amount_tzs, status,
       is_test, payment_mode, package_id, customer_id, provider_payload, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?)
   `).run(
     paymentId,
+    businessId,
     reference,
     params.provider,
-    normalizedPhone,
+    contactValue,
     pkg.price_tzs,
     isTest,
     paymentMode,
@@ -170,9 +193,10 @@ export function initiatePayment(
 
   return {
     paymentId,
+    businessId,
     reference,
     provider: params.provider,
-    phoneNumber: normalizedPhone,
+    phoneNumber: contactValue,
     packageName: pkg.name,
     amountTzs: pkg.price_tzs,
     status: 'PENDING' as const,
@@ -181,7 +205,7 @@ export function initiatePayment(
     providerConfigured,
     missingCredentials: providerInfo?.missingCredentials ?? [],
     message: providerConfigured
-      ? `Payment request ${reference} queued for ${params.provider}. Complete the USSD prompt on ${normalizedPhone}.`
+      ? `Payment request ${reference} queued for ${params.provider}. Complete verification for ${contactValue}.`
       : `Transaction ${reference} created in Standalone Mode. Confirm payment below to receive your Voucher Token.`,
   };
 }
@@ -213,6 +237,7 @@ export function confirmStandalonePaymentForToken(db: NetcoDb, reference: string)
         .get(String(payment.voucher_id)) as { code_encrypted: string } | undefined;
       return {
         reference: String(payment.reference),
+        businessId: String(payment.business_id),
         provider: String(payment.provider),
         phoneNumber: String(payment.phone_number),
         packageName: String(payment.package_name),
@@ -232,14 +257,16 @@ export function confirmStandalonePaymentForToken(db: NetcoDb, reference: string)
     const voucherId = generateId('vch');
     const receiptNumber = generateReference('TST');
     const nowIso = new Date().toISOString();
+    const businessId = String(payment.business_id);
 
     db.prepare(`
       INSERT INTO vouchers (
-        id, code_hash, code_encrypted, code_masked, batch_id,
+        id, business_id, code_hash, code_encrypted, code_masked, batch_id,
         package_id, customer_id, status, is_test, test_note, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'UNUSED', 1, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNUSED', 1, ?, ?, ?)
     `).run(
       voucherId,
+      businessId,
       sha256(voucherCode),
       encryptSecret(voucherCode),
       maskVoucherCode(voucherCode),
@@ -264,10 +291,11 @@ export function confirmStandalonePaymentForToken(db: NetcoDb, reference: string)
     `).run(receiptNumber, voucherId, nowIso, nowIso, String(payment.id));
 
     db.prepare(`
-      INSERT INTO notifications (id, type, severity, title, message, metadata)
-      VALUES (?, 'STANDALONE_TOKEN_ISSUED', 'INFO', ?, ?, ?)
+      INSERT INTO notifications (id, business_id, type, severity, title, message, metadata)
+      VALUES (?, ?, 'STANDALONE_TOKEN_ISSUED', 'INFO', ?, ?, ?)
     `).run(
       generateId('ntf'),
+      businessId,
       `[TEST MODE] Token Issued (${receiptNumber})`,
       `Standalone payment ${String(payment.reference)} issued dev/test voucher token for ${String(payment.package_name)} (excluded from verified revenue).`,
       JSON.stringify({ reference: String(payment.reference), receiptNumber, voucherId, isTest: true })
@@ -275,6 +303,7 @@ export function confirmStandalonePaymentForToken(db: NetcoDb, reference: string)
 
     return {
       reference: String(payment.reference),
+      businessId,
       provider: String(payment.provider),
       phoneNumber: String(payment.phone_number),
       packageName: String(payment.package_name),
@@ -287,7 +316,7 @@ export function confirmStandalonePaymentForToken(db: NetcoDb, reference: string)
   });
 }
 
-export function processVerifiedPaymentCallback(
+export async function processVerifiedPaymentCallback(
   db: NetcoDb,
   params: {
     provider: MobileMoneyProvider;
@@ -298,34 +327,46 @@ export function processVerifiedPaymentCallback(
     amountTzs?: number;
     rawPayload: Record<string, unknown>;
   }
-): {
+): Promise<{
   duplicate: boolean;
   paymentId: string;
+  businessId: string;
   reference: string;
   status: string;
   receiptNumber?: string;
   issuedVoucherCode?: string;
-} {
-  return withTransaction(db, () => {
+  subscriptionId?: string;
+  provisioningStatus?: string;
+}> {
+  const txResult = withTransaction(db, () => {
     const existingEvent = db
       .prepare('SELECT id FROM webhook_events WHERE provider = ? AND external_event_id = ?')
       .get(params.provider, params.externalEventId) as { id: string } | undefined;
 
     const payment = db
-      .prepare('SELECT * FROM payments WHERE reference = ?')
+      .prepare(`
+        SELECT p.*, pk.duration_minutes, pk.location_id
+        FROM payments p
+        JOIN packages pk ON pk.id = p.package_id
+        WHERE p.reference = ?
+      `)
       .get(params.reference) as Record<string, unknown> | undefined;
 
     if (!payment) {
       throw new Error(`Payment reference ${params.reference} not found`);
     }
 
+    const businessId = String(payment.business_id);
+
     if (existingEvent) {
       return {
         duplicate: true,
         paymentId: String(payment.id),
+        businessId,
         reference: String(payment.reference),
         status: String(payment.status),
         receiptNumber: payment.receipt_number ? String(payment.receipt_number) : undefined,
+        shouldProvision: false,
       };
     }
 
@@ -354,10 +395,11 @@ export function processVerifiedPaymentCallback(
       `).run(params.externalTxId, JSON.stringify(params.rawPayload), nowIso, String(payment.id));
 
       db.prepare(`
-        INSERT INTO notifications (id, type, severity, title, message, metadata)
-        VALUES (?, 'PAYMENT_FAILED', 'WARNING', ?, ?, ?)
+        INSERT INTO notifications (id, business_id, type, severity, title, message, metadata)
+        VALUES (?, ?, 'PAYMENT_FAILED', 'WARNING', ?, ?, ?)
       `).run(
         generateId('ntf'),
+        businessId,
         `Payment Failed (${params.reference})`,
         `${params.provider} payment for ${payment.phone_number} failed verification.`,
         JSON.stringify({ reference: params.reference, provider: params.provider })
@@ -366,8 +408,10 @@ export function processVerifiedPaymentCallback(
       return {
         duplicate: false,
         paymentId: String(payment.id),
+        businessId,
         reference: String(payment.reference),
         status: 'FAILED',
+        shouldProvision: false,
       };
     }
 
@@ -386,23 +430,33 @@ export function processVerifiedPaymentCallback(
         `).run(nowIso, nowIso, String(payment.voucher_id));
       }
 
+      db.prepare("UPDATE subscriptions SET status = 'SUSPENDED', revoked_at = ?, updated_at = ? WHERE payment_id = ?").run(
+        nowIso,
+        nowIso,
+        String(payment.id)
+      );
+
       return {
         duplicate: false,
         paymentId: String(payment.id),
+        businessId,
         reference: String(payment.reference),
         status: 'REFUNDED',
         receiptNumber: payment.receipt_number ? String(payment.receipt_number) : undefined,
+        shouldProvision: false,
       };
     }
 
-    // COMPLETED — only create a voucher if not already issued
+    // COMPLETED — only create voucher & subscription if not already issued
     if (String(payment.status) === 'COMPLETED' && payment.voucher_id) {
       return {
         duplicate: true,
         paymentId: String(payment.id),
+        businessId,
         reference: String(payment.reference),
         status: 'COMPLETED',
         receiptNumber: payment.receipt_number ? String(payment.receipt_number) : undefined,
+        shouldProvision: false,
       };
     }
 
@@ -412,11 +466,12 @@ export function processVerifiedPaymentCallback(
 
     db.prepare(`
       INSERT INTO vouchers (
-        id, code_hash, code_encrypted, code_masked, batch_id,
+        id, business_id, code_hash, code_encrypted, code_masked, batch_id,
         package_id, customer_id, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'UNUSED', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNUSED', ?, ?)
     `).run(
       voucherId,
+      businessId,
       sha256(voucherCode),
       encryptSecret(voucherCode),
       maskVoucherCode(voucherCode),
@@ -430,6 +485,7 @@ export function processVerifiedPaymentCallback(
     db.prepare(`
       UPDATE payments
       SET status = 'COMPLETED',
+          is_test = 0,
           receipt_number = ?,
           external_tx_id = ?,
           voucher_id = ?,
@@ -448,22 +504,69 @@ export function processVerifiedPaymentCallback(
     );
 
     db.prepare(`
-      INSERT INTO notifications (id, type, severity, title, message, metadata)
-      VALUES (?, 'PAYMENT_SUCCESS', 'INFO', ?, ?, ?)
+      INSERT INTO notifications (id, business_id, type, severity, title, message, metadata)
+      VALUES (?, ?, 'PAYMENT_SUCCESS', 'INFO', ?, ?, ?)
     `).run(
       generateId('ntf'),
+      businessId,
       `Payment Verified (${receiptNumber})`,
-      `${params.provider} payment of ${Number(payment.amount_tzs).toLocaleString()} TZS verified; voucher issued.`,
+      `${params.provider} payment of ${Number(payment.amount_tzs).toLocaleString()} TZS verified; voucher & RADIUS subscription issued.`,
       JSON.stringify({ reference: params.reference, receiptNumber, voucherId })
     );
 
+    const expiresAtIso = new Date(Date.now() + Number(payment.duration_minutes) * 60_000).toISOString();
     return {
       duplicate: false,
       paymentId: String(payment.id),
+      businessId,
+      locationId: payment.location_id ? String(payment.location_id) : null,
+      customerId: payment.customer_id ? String(payment.customer_id) : null,
+      packageId: String(payment.package_id),
+      voucherId,
       reference: String(payment.reference),
       status: 'COMPLETED',
       receiptNumber,
       issuedVoucherCode: voucherCode,
+      startsAtIso: nowIso,
+      expiresAtIso,
+      shouldProvision: true,
     };
   });
+
+  if (!txResult.shouldProvision || !txResult.issuedVoucherCode) {
+    return {
+      duplicate: txResult.duplicate,
+      paymentId: txResult.paymentId,
+      businessId: txResult.businessId,
+      reference: txResult.reference,
+      status: txResult.status,
+      receiptNumber: txResult.receiptNumber,
+    };
+  }
+
+  const radiusUsername = txResult.issuedVoucherCode.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  const prov = await provisionSubscriptionForActivation(db, {
+    businessId: txResult.businessId,
+    locationId: txResult.locationId ?? null,
+    customerId: txResult.customerId ?? null,
+    packageId: txResult.packageId!,
+    paymentId: txResult.paymentId,
+    voucherId: txResult.voucherId!,
+    radiusUsername,
+    radiusSecretValue: txResult.issuedVoucherCode,
+    startsAtIso: txResult.startsAtIso!,
+    expiresAtIso: txResult.expiresAtIso!,
+  });
+
+  return {
+    duplicate: false,
+    paymentId: txResult.paymentId,
+    businessId: txResult.businessId,
+    reference: txResult.reference,
+    status: 'COMPLETED',
+    receiptNumber: txResult.receiptNumber,
+    issuedVoucherCode: txResult.issuedVoucherCode,
+    subscriptionId: prov.subscriptionId,
+    provisioningStatus: prov.provisioningStatus,
+  };
 }

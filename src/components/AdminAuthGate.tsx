@@ -3,12 +3,16 @@ import { signInWithPopup } from 'firebase/auth';
 import {
   ArrowLeft,
   ArrowRight,
+  Building2,
   CheckCircle2,
   Eye,
   EyeOff,
+  Globe,
   KeyRound,
   Lock,
   Mail,
+  MapPin,
+  Phone,
   ShieldCheck,
   User,
 } from 'lucide-react';
@@ -16,13 +20,23 @@ import { auth, googleAuthProvider } from '../lib/firebase.ts';
 import { apiRequest } from '../lib/api.ts';
 import { TRANSLATIONS, type AppLanguage } from '../lib/i18n.ts';
 import { LanguageSwitcher } from './LanguageSwitcher.tsx';
-import { NetcoLogo } from './NetcoLogo.tsx';
+import { TraxLogo } from './NetcoLogo.tsx';
 
 export interface AuthUser {
   id: string;
+  businessId?: string;
+  businessName?: string | null;
+  businessStatus?: string;
   email: string;
   fullName: string;
-  role: 'SUPER_ADMIN' | 'ADMIN' | 'NETWORK_OPERATOR' | 'CASHIER';
+  role:
+    | 'SUPER_ADMIN'
+    | 'BUSINESS_OWNER'
+    | 'ADMIN'
+    | 'ACCOUNTANT'
+    | 'NETWORK_OPERATOR'
+    | 'SUPPORT_STAFF'
+    | 'CASHIER';
 }
 
 interface Props {
@@ -39,7 +53,7 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
     envPasscodeConfigured: boolean;
   } | null>(null);
 
-  const [mode, setMode] = useState<'login' | 'bootstrap' | 'forgot'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'bootstrap' | 'forgot'>('login');
   const [forgotStep, setForgotStep] = useState<'request' | 'verify'>('request');
 
   const [email, setEmail] = useState('');
@@ -47,6 +61,13 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [setupPasscode, setSetupPasscode] = useState('');
+
+  // Business self-service registration state
+  const [businessName, setBusinessName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [country, setCountry] = useState('Tanzania');
+  const [region, setRegion] = useState('Dar es Salaam');
+  const [planCode, setPlanCode] = useState<'STARTER' | 'GROWTH' | 'ENTERPRISE'>('STARTER');
 
   const [resetCode, setResetCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -83,6 +104,21 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
         const res = await apiRequest<{ token: string; user: AuthUser }>('/api/auth/bootstrap', {
           method: 'POST',
           body: { email, fullName, password, setupPasscode: setupPasscode || undefined },
+        });
+        onAuthenticated(res.token, res.user, 'SESSION');
+      } else if (mode === 'register') {
+        const res = await apiRequest<{ token: string; user: AuthUser }>('/api/auth/register-business', {
+          method: 'POST',
+          body: {
+            businessName,
+            ownerName: fullName,
+            ownerEmail: email,
+            phone,
+            password,
+            country,
+            region,
+            planCode,
+          },
         });
         onAuthenticated(res.token, res.user, 'SESSION');
       } else {
@@ -180,11 +216,11 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-[#080B12] flex flex-col justify-center px-3.5 sm:px-4 py-6 sm:py-12">
-      <div className="max-w-md w-full mx-auto space-y-5 sm:space-y-6">
+    <div className="min-h-screen bg-stone-100 dark:bg-[#101010] flex flex-col justify-center px-3.5 sm:px-4 py-6 sm:py-10">
+      <div className="max-w-md w-full mx-auto space-y-5">
         <div className="flex flex-col items-center gap-3">
           <div className="w-full flex items-center justify-between gap-2">
-            <span className="text-[11px] font-mono uppercase tracking-wider text-slate-500 dark:text-[#8793A5]">
+            <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
               {t.staffConsole}
             </span>
             <div className="flex items-center gap-2">
@@ -195,25 +231,31 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                 className="btn-secondary min-h-[38px] px-3 text-xs"
               >
                 {t.buyVoucher}
-                <ArrowRight className="w-3.5 h-3.5 text-[#16B8FF]" />
+                <ArrowRight className="w-3.5 h-3.5 text-[#B8860B] dark:text-[#FFD400]" />
               </button>
             </div>
           </div>
-          <NetcoLogo variant="banner" className="py-1" />
+          <div className="p-3 rounded-2xl bg-[#161618] border border-zinc-800">
+            <TraxLogo variant="banner" />
+          </div>
         </div>
 
-        <div className="bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 space-y-5 shadow-sm">
+        <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-2xl p-5 sm:p-6 space-y-5 shadow-sm">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
+            <h2 className="text-lg font-semibold text-[#101010] dark:text-white">
               {mode === 'bootstrap'
                 ? t.claimTitle
+                : mode === 'register'
+                ? t.registerTitle
                 : mode === 'forgot'
                 ? t.resetTitle
                 : t.signInTitle}
             </h2>
-            <p className="text-sm text-slate-500 dark:text-[#8793A5] mt-1">
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
               {mode === 'bootstrap'
                 ? t.claimSubtitle
+                : mode === 'register'
+                ? t.registerSubtitle
                 : mode === 'forgot'
                 ? forgotStep === 'request'
                   ? t.resetReqSubtitle
@@ -222,8 +264,8 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
             </p>
           </div>
 
-          {bootstrapStatus && mode !== 'forgot' && (
-            <div className="btn-tab-group w-full">
+          {mode !== 'forgot' && (
+            <div className="btn-tab-group w-full overflow-x-auto">
               <button
                 type="button"
                 onClick={() => {
@@ -235,7 +277,18 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
               >
                 {t.tabLogin}
               </button>
-              {(bootstrapStatus.needsPasswordBootstrap || bootstrapStatus.envPasscodeConfigured) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('register');
+                  setError(null);
+                  setInfoMessage(null);
+                }}
+                className={`flex-1 ${mode === 'register' ? 'btn-tab-active' : 'btn-tab'}`}
+              >
+                {t.tabRegister}
+              </button>
+              {bootstrapStatus && (bootstrapStatus.needsPasswordBootstrap || bootstrapStatus.envPasscodeConfigured) && (
                 <button
                   type="button"
                   onClick={() => {
@@ -268,27 +321,23 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
             forgotStep === 'request' ? (
               <form onSubmit={handleRequestReset} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
                     {t.emailLabel}
                   </label>
                   <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Mail className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="email"
                       required
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       placeholder={t.emailPlaceholder}
-                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                     />
                   </div>
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="btn-primary w-full min-h-[46px] text-sm"
-                >
+                <button type="submit" disabled={loading} className="btn-primary w-full min-h-[46px] text-sm">
                   {loading ? t.sendingBtn : t.requestCodeBtn}
                 </button>
 
@@ -296,7 +345,7 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                   <button
                     type="button"
                     onClick={backToLogin}
-                    className="inline-flex items-center gap-1.5 font-medium text-slate-600 dark:text-[#8793A5] hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                    className="inline-flex items-center gap-1.5 font-medium text-zinc-600 dark:text-zinc-400 hover:text-[#101010] dark:hover:text-white cursor-pointer"
                   >
                     <ArrowLeft className="w-3.5 h-3.5" />
                     {t.backToSignIn}
@@ -307,7 +356,7 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                       setError(null);
                       setForgotStep('verify');
                     }}
-                    className="font-medium text-[#0284C7] dark:text-[#16B8FF] hover:underline cursor-pointer"
+                    className="font-medium text-[#B8860B] dark:text-[#FFD400] hover:underline cursor-pointer"
                   >
                     {t.alreadyHaveCode}
                   </button>
@@ -316,45 +365,45 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
             ) : (
               <form onSubmit={handleResetPassword} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
                     {t.emailLabel}
                   </label>
                   <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Mail className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="email"
                       required
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       placeholder={t.emailPlaceholder}
-                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
                     {t.recoveryCodeLabel}
                   </label>
                   <div className="relative">
-                    <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <KeyRound className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
                       required
                       value={resetCode}
                       onChange={(e) => setResetCode(e.target.value.toUpperCase())}
                       placeholder="XXXX-XXXX"
-                      className="w-full pl-9 pr-3 py-2 text-sm font-mono tracking-wider rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                      className="w-full pl-9 pr-3 py-2 text-sm font-mono tracking-wider rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
                     {t.newPasswordLabel}
                   </label>
                   <div className="relative">
-                    <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Lock className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type={showNewPassword ? 'text' : 'password'}
                       required
@@ -362,13 +411,13 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       placeholder={t.min8Placeholder}
-                      className="w-full pl-9 pr-10 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                      className="w-full pl-9 pr-10 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                     />
                     <button
                       type="button"
                       onClick={() => setShowNewPassword((v) => !v)}
                       aria-label={showNewPassword ? t.hidePassword : t.showPassword}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-zinc-400 hover:text-[#101010] dark:hover:text-white cursor-pointer"
                     >
                       {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
@@ -376,11 +425,11 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
                     {t.confirmPasswordLabel}
                   </label>
                   <div className="relative">
-                    <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Lock className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type={showConfirmPassword ? 'text' : 'password'}
                       required
@@ -388,24 +437,20 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       placeholder={t.repeatPasswordPlaceholder}
-                      className="w-full pl-9 pr-10 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                      className="w-full pl-9 pr-10 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                     />
                     <button
                       type="button"
                       onClick={() => setShowConfirmPassword((v) => !v)}
                       aria-label={showConfirmPassword ? t.hidePassword : t.showPassword}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-zinc-400 hover:text-[#101010] dark:hover:text-white cursor-pointer"
                     >
                       {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="btn-primary w-full min-h-[46px] text-sm"
-                >
+                <button type="submit" disabled={loading} className="btn-primary w-full min-h-[46px] text-sm">
                   {loading ? t.updatingBtn : t.updatePasswordBtn}
                 </button>
 
@@ -413,7 +458,7 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                   <button
                     type="button"
                     onClick={backToLogin}
-                    className="inline-flex items-center gap-1.5 font-medium text-slate-600 dark:text-[#8793A5] hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                    className="inline-flex items-center gap-1.5 font-medium text-zinc-600 dark:text-zinc-400 hover:text-[#101010] dark:hover:text-white cursor-pointer"
                   >
                     <ArrowLeft className="w-3.5 h-3.5" />
                     {t.backToSignIn}
@@ -424,7 +469,7 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                       setError(null);
                       setForgotStep('request');
                     }}
-                    className="font-medium text-[#0284C7] dark:text-[#16B8FF] hover:underline cursor-pointer"
+                    className="font-medium text-[#B8860B] dark:text-[#FFD400] hover:underline cursor-pointer"
                   >
                     {t.requestNewCode}
                   </button>
@@ -432,75 +477,165 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
               </form>
             )
           ) : (
-            <form onSubmit={handleSubmit} className="space-y-4">
-              {mode === 'bootstrap' && (
+            <form onSubmit={handleSubmit} className="space-y-3.5">
+              {mode === 'register' && (
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                    {t.fullNameLabel}
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                    {t.businessNameLabel}
                   </label>
                   <div className="relative">
-                    <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Building2 className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
                       required
-                      value={fullName}
-                      onChange={(e) => setFullName(e.target.value)}
-                      placeholder="Chief Network Administrator"
-                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                      value={businessName}
+                      onChange={(e) => setBusinessName(e.target.value)}
+                      placeholder={t.businessNamePlaceholder}
+                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                     />
                   </div>
                 </div>
               )}
 
+              {(mode === 'bootstrap' || mode === 'register') && (
+                <div>
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                    {t.fullNameLabel}
+                  </label>
+                  <div className="relative">
+                    <User className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      required
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                      placeholder={mode === 'bootstrap' ? 'TRAX LINK Platform Super Admin' : 'Juma Hassan'}
+                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {mode === 'register' && (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                        {t.phoneLabel}
+                      </label>
+                      <div className="relative">
+                        <Phone className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="tel"
+                          required
+                          value={phone}
+                          onChange={(e) => setPhone(e.target.value)}
+                          placeholder="+255 754 000 111"
+                          className="w-full pl-9 pr-3 py-2 text-sm font-mono rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                        {t.planLabel}
+                      </label>
+                      <select
+                        value={planCode}
+                        onChange={(e) => setPlanCode(e.target.value as typeof planCode)}
+                        className="w-full px-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
+                      >
+                        <option value="STARTER">Starter (25k TZS/mo)</option>
+                        <option value="GROWTH">Growth (65k TZS/mo)</option>
+                        <option value="ENTERPRISE">Enterprise (180k TZS/mo)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                        {t.countryLabel}
+                      </label>
+                      <div className="relative">
+                        <Globe className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          required
+                          value={country}
+                          onChange={(e) => setCountry(e.target.value)}
+                          className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010]"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                        {t.regionLabel}
+                      </label>
+                      <div className="relative">
+                        <MapPin className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          required
+                          value={region}
+                          onChange={(e) => setRegion(e.target.value)}
+                          className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010]"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+
               <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
                   {t.emailAddressLabel}
                 </label>
                 <div className="relative">
-                  <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <Mail className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="email"
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder={t.emailPlaceholder}
-                    className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                    className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                   />
                 </div>
               </div>
 
               <div>
                 <div className="flex items-center justify-between gap-2 mb-1.5">
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300">
                     {t.passwordLabel}
                   </label>
                   {mode === 'login' && (
                     <button
                       type="button"
                       onClick={openForgotPassword}
-                      className="text-xs font-medium text-[#0284C7] dark:text-[#16B8FF] hover:underline cursor-pointer"
+                      className="text-xs font-medium text-[#B8860B] dark:text-[#FFD400] hover:underline cursor-pointer"
                     >
                       {t.forgotPassword}
                     </button>
                   )}
                 </div>
                 <div className="relative">
-                  <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <Lock className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type={showPassword ? 'text' : 'password'}
                     required
-                    minLength={mode === 'bootstrap' ? 8 : 1}
+                    minLength={mode === 'bootstrap' || mode === 'register' ? 8 : 1}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder={mode === 'bootstrap' ? t.min8Placeholder : t.passwordPlaceholder}
-                    className="w-full pl-9 pr-10 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                    placeholder={
+                      mode === 'bootstrap' || mode === 'register' ? t.min8Placeholder : t.passwordPlaceholder
+                    }
+                    className="w-full pl-9 pr-10 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword((v) => !v)}
                     aria-label={showPassword ? t.hidePassword : t.showPassword}
                     title={showPassword ? t.hidePassword : t.showPassword}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-zinc-400 hover:text-[#101010] dark:hover:text-white cursor-pointer"
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -509,69 +644,73 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
 
               {mode === 'bootstrap' && bootstrapStatus?.envPasscodeConfigured && (
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
                     {t.setupPasscodeLabel}
                   </label>
                   <div className="relative">
-                    <ShieldCheck className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <ShieldCheck className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="password"
                       required
                       value={setupPasscode}
                       onChange={(e) => setSetupPasscode(e.target.value)}
                       placeholder="ADMIN_INITIAL_PASSCODE"
-                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] text-slate-900 dark:text-white focus:outline-none focus:border-[#16B8FF]"
+                      className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
                     />
                   </div>
                 </div>
               )}
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="btn-primary w-full min-h-[46px] text-sm"
-              >
+              <button type="submit" disabled={loading} className="btn-primary w-full min-h-[46px] text-sm">
                 {loading
-                  ? t.signingInBtn
+                  ? mode === 'register'
+                    ? t.creatingBusinessBtn
+                    : t.signingInBtn
                   : mode === 'bootstrap'
                   ? t.createAdminBtn
+                  : mode === 'register'
+                  ? t.createBusinessBtn
                   : t.signInBtn}
               </button>
             </form>
           )}
 
-          <div className="relative flex items-center py-1">
-            <div className="flex-grow border-t border-slate-200 dark:border-slate-800" />
-            <span className="px-3 text-xs text-slate-400 dark:text-[#8793A5]">{t.orDivider}</span>
-            <div className="flex-grow border-t border-slate-200 dark:border-slate-800" />
-          </div>
+          {mode !== 'register' && (
+            <>
+              <div className="relative flex items-center py-1">
+                <div className="flex-grow border-t border-stone-200 dark:border-zinc-800" />
+                <span className="px-3 text-xs text-zinc-400">{t.orDivider}</span>
+                <div className="flex-grow border-t border-stone-200 dark:border-zinc-800" />
+              </div>
 
-          <button
-            type="button"
-            disabled={loading}
-            onClick={handleGoogleSignIn}
-            className="btn-secondary w-full min-h-[46px] text-sm"
-          >
-            <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fill="#4285F4"
-                d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
-              />
-              <path
-                fill="#34A853"
-                d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
-              />
-              <path
-                fill="#FBBC05"
-                d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
-              />
-              <path
-                fill="#EA4335"
-                d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
-              />
-            </svg>
-            {t.googleBtn}
-          </button>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={handleGoogleSignIn}
+                className="btn-secondary w-full min-h-[46px] text-sm"
+              >
+                <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    fill="#4285F4"
+                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+                  />
+                </svg>
+                {t.googleBtn}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

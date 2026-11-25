@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Download, FileText } from 'lucide-react';
-import { apiRequest, formatBytes, formatTzs } from '../lib/api.ts';
+import { apiRequest, formatBytes, formatTzs, getTenantHeaders } from '../lib/api.ts';
 import { exportReportPdf } from '../lib/pdfExport.ts';
 
 interface ReportOverview {
@@ -61,7 +61,7 @@ export function ReportsView({ token }: Props) {
     try {
       setError(null);
       const res = await fetch(`/api/reports/export/csv?type=${type}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, ...getTenantHeaders() },
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -71,7 +71,7 @@ export function ReportsView({ token }: Props) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `netco-${type}-report.csv`;
+      a.download = `traxlink-${type}-report.csv`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -92,13 +92,13 @@ export function ReportsView({ token }: Props) {
         String(p.vouchersIssued),
         String(p.vouchersRedeemed),
       ]),
-      filename: 'netco-sales-report.pdf',
+      filename: 'traxlink-sales-report.pdf',
     });
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-4 bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-4">
+      <div className="flex flex-wrap items-end justify-between gap-4 bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-4">
         <div className="flex flex-wrap items-end gap-3 text-xs w-full sm:w-auto">
           <div className="flex-1 sm:flex-initial min-w-[130px]">
             <label className="block text-slate-500 dark:text-[#8793A5] mb-1">From Date</label>
@@ -106,7 +106,7 @@ export function ReportsView({ token }: Props) {
               type="date"
               value={fromDate}
               onChange={(e) => setFromDate(e.target.value)}
-              className="w-full px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+              className="w-full px-3 py-1.5 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
             />
           </div>
           <div className="flex-1 sm:flex-initial min-w-[130px]">
@@ -115,7 +115,7 @@ export function ReportsView({ token }: Props) {
               type="date"
               value={toDate}
               onChange={(e) => setToDate(e.target.value)}
-              className="w-full px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+              className="w-full px-3 py-1.5 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
             />
           </div>
           <button
@@ -165,7 +165,7 @@ export function ReportsView({ token }: Props) {
         <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Building reports...</div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 space-y-3">
+          <div className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-3">
             <h3 className="text-sm font-semibold">Verified Revenue by Mobile Money Provider</h3>
             {data.revenueByProvider.length === 0 ? (
               <p className="text-xs text-slate-500 dark:text-[#8793A5] py-6 text-center">
@@ -198,7 +198,7 @@ export function ReportsView({ token }: Props) {
             )}
           </div>
 
-          <div className="p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 space-y-3">
+          <div className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-3">
             <h3 className="text-sm font-semibold">Session & Traffic Summary</h3>
             {data.sessionStats.length === 0 ? (
               <p className="text-xs text-slate-500 dark:text-[#8793A5] py-6 text-center">
@@ -226,7 +226,7 @@ export function ReportsView({ token }: Props) {
             )}
           </div>
 
-          <div className="lg:col-span-2 p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 space-y-3">
+          <div className="lg:col-span-2 p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-3">
             <h3 className="text-sm font-semibold">Package Sales & Voucher Redemptions</h3>
             {data.packageSales.length === 0 ? (
               <p className="text-xs text-slate-500 dark:text-[#8793A5] py-6 text-center">No package sales data yet.</p>

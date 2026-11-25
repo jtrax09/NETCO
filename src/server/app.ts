@@ -2,17 +2,23 @@ import express from 'express';
 import crypto from 'node:crypto';
 import type { Server as SocketIOServer } from 'socket.io';
 import { z } from 'zod';
-import type { NetcoDb } from './db.ts';
 import {
+  DEFAULT_BUSINESS_ID,
   expireStaleRecords,
   getOperatingMode,
   setOperatingMode,
   withTransaction,
+  type NetcoDb,
 } from './db.ts';
 import {
+  ALL_BUSINESS_ROLES,
+  BUSINESS_MANAGEMENT_ROLES,
   createAuthMiddleware,
+  FINANCE_ROLES,
   getClientIp,
+  NETWORK_ROLES,
   recordAuditLog,
+  resolveTenantScope,
   type AuthedRequest,
   type StaffRole,
 } from './middleware/auth.ts';
@@ -46,6 +52,7 @@ import {
   syncRouterTelemetry,
   terminateRouterSession,
 } from './services/mikrotik.ts';
+import { registerSaasRoutes } from './routes/saasRoutes.ts';
 
 function csvEscape(val: unknown): string {
   const s = val === null || val === undefined ? '' : String(val);
@@ -65,7 +72,6 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   const app = express();
   app.set('trust proxy', true);
 
-  // Capture raw body for HMAC webhook signature verification
   app.use(
     express.json({
       limit: '1mb',
@@ -75,7 +81,6 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     })
   );
 
-  // Security headers compatible with AI Studio preview iFrame
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -84,8 +89,11 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   });
 
   const { requireAuth, requireRole } = createAuthMiddleware(db);
-  const authLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 25, bucketName: 'auth' });
-  const portalLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 30, bucketName: 'portal' });
+  const authLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 30, bucketName: 'auth' });
+  const portalLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 35, bucketName: 'portal' });
+
+  // Mount TRAX LINK multi-tenant SaaS, Super Admin, Locations, Subscriptions, and FreeRADIUS routes
+  registerSaasRoutes(app, db, io, { requireAuth, requireRole }, authLimiter);
 
   // =========================================================================
   // HEALTH & OPERATING MODE
@@ -93,19 +101,27 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   app.get('/api/health', (_req, res) => {
     res.json({
       status: 'ok',
-      service: 'NETCO',
+      service: 'TRAX LINK',
       operatingMode: getOperatingMode(db),
       timestamp: new Date().toISOString(),
     });
   });
 
-  app.get('/api/system/mode', (_req, res) => {
+  app.get('/api/system/mode', (req, res) => {
     const operatingMode = getOperatingMode(db);
-    const counts = db
-      .prepare(
-        "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'CONNECTED' THEN 1 ELSE 0 END) as connected FROM routers"
-      )
-      .get() as { total: number; connected: number | null };
+    const bizFilter = typeof req.query.businessId === 'string' && req.query.businessId.trim() ? req.query.businessId.trim() : null;
+    const counts = bizFilter
+      ? (db
+          .prepare(
+            "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'CONNECTED' THEN 1 ELSE 0 END) as connected FROM routers WHERE business_id = ?"
+          )
+          .get(bizFilter) as { total: number; connected: number | null })
+      : (db
+          .prepare(
+            "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'CONNECTED' THEN 1 ELSE 0 END) as connected FROM routers"
+          )
+          .get() as { total: number; connected: number | null });
+
     const routerCount = Number(counts?.total || 0);
     const connectedRouterCount = Number(counts?.connected || 0);
     res.json({
@@ -121,7 +137,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     });
   });
 
-  app.patch('/api/system/mode', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
+  app.patch('/api/system/mode', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
     const schema = z.object({
       operatingMode: z.enum(['STANDALONE_MODE', 'MIKROTIK_MODE']),
     });
@@ -189,24 +205,24 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       if (existing) {
         db.prepare(`
           UPDATE admin_users
-          SET password_hash = ?, full_name = ?, role = 'SUPER_ADMIN', is_active = 1, last_login_at = ?, updated_at = ?
+          SET password_hash = ?, full_name = ?, role = 'SUPER_ADMIN', business_id = ?, is_active = 1, last_login_at = ?, updated_at = ?
           WHERE id = ?
-        `).run(passwordHash, parsed.data.fullName, nowIso, nowIso, existing.id);
+        `).run(passwordHash, parsed.data.fullName, DEFAULT_BUSINESS_ID, nowIso, nowIso, existing.id);
         return existing.id;
       }
 
       const id = generateId('adm');
       db.prepare(`
-        INSERT INTO admin_users (id, email, full_name, password_hash, role, is_active, last_login_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'SUPER_ADMIN', 1, ?, ?, ?)
-      `).run(id, emailLower, parsed.data.fullName, passwordHash, nowIso, nowIso, nowIso);
+        INSERT INTO admin_users (id, business_id, email, full_name, password_hash, role, is_active, last_login_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'SUPER_ADMIN', 1, ?, ?, ?)
+      `).run(id, DEFAULT_BUSINESS_ID, emailLower, parsed.data.fullName, passwordHash, nowIso, nowIso, nowIso);
 
       const codeExists = db.prepare('SELECT id FROM staff WHERE staff_code = ?').get('STF-001');
       const staffCode = codeExists ? generateReference('STF') : 'STF-001';
       db.prepare(`
-        INSERT INTO staff (id, admin_user_id, staff_code, department, role)
-        VALUES (?, ?, ?, 'Executive Operations', 'SUPER_ADMIN')
-      `).run(generateId('stf'), id, staffCode);
+        INSERT INTO staff (id, business_id, admin_user_id, staff_code, department, role)
+        VALUES (?, ?, ?, ?, 'Executive Operations', 'SUPER_ADMIN')
+      `).run(generateId('stf'), DEFAULT_BUSINESS_ID, id, staffCode);
 
       return id;
     });
@@ -220,7 +236,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     recordAuditLog(
       db,
-      { id: adminId, email: emailLower, role: 'SUPER_ADMIN' },
+      { id: adminId, businessId: DEFAULT_BUSINESS_ID, email: emailLower, role: 'SUPER_ADMIN' },
       'ADMIN_BOOTSTRAP',
       'AdminUser',
       adminId,
@@ -230,7 +246,15 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.status(201).json({
       token: rawToken,
       expiresAt,
-      user: { id: adminId, email: emailLower, fullName: parsed.data.fullName, role: 'SUPER_ADMIN' },
+      user: {
+        id: adminId,
+        businessId: DEFAULT_BUSINESS_ID,
+        businessName: 'TRAX LINK Primary Hotspot',
+        businessStatus: 'ACTIVE',
+        email: emailLower,
+        fullName: parsed.data.fullName,
+        role: 'SUPER_ADMIN',
+      },
     });
   });
 
@@ -247,9 +271,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     const emailLower = parsed.data.email.toLowerCase();
     const user = db
       .prepare(`
-        SELECT u.*, st.is_suspended
+        SELECT u.*, st.is_suspended, b.name as business_name, b.status as business_status
         FROM admin_users u
         LEFT JOIN staff st ON st.admin_user_id = u.id
+        LEFT JOIN businesses b ON b.id = u.business_id
         WHERE LOWER(u.email) = ?
       `)
       .get(emailLower) as Record<string, unknown> | undefined;
@@ -262,6 +287,13 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       return res.status(403).json({ error: 'Account is suspended or deactivated' });
     }
 
+    const role = String(user.role) as StaffRole;
+    const businessStatus = String(user.business_status || 'ACTIVE');
+    if (role !== 'SUPER_ADMIN' && businessStatus === 'SUSPENDED') {
+      return res.status(403).json({ error: 'Business workspace is suspended. Contact TRAX LINK support.' });
+    }
+
+    const businessId = String(user.business_id || DEFAULT_BUSINESS_ID);
     const nowIso = new Date().toISOString();
     const rawToken = generateSessionToken();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
@@ -285,7 +317,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     recordAuditLog(
       db,
-      { id: String(user.id), email: String(user.email), role: String(user.role) },
+      { id: String(user.id), businessId, email: String(user.email), role },
       'STAFF_LOGIN',
       'AdminUser',
       String(user.id),
@@ -297,9 +329,12 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       expiresAt,
       user: {
         id: String(user.id),
+        businessId,
+        businessName: String(user.business_name || 'TRAX LINK Primary Hotspot'),
+        businessStatus,
         email: String(user.email),
         fullName: String(user.full_name),
-        role: String(user.role),
+        role,
       },
     });
   });
@@ -335,7 +370,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     const nowIso = new Date().toISOString();
     const user = db
       .prepare(`
-        SELECT u.id, u.email, u.full_name, u.role, u.is_active, st.is_suspended
+        SELECT u.id, u.business_id, u.email, u.full_name, u.role, u.is_active, st.is_suspended
         FROM admin_users u
         LEFT JOIN staff st ON st.admin_user_id = u.id
         WHERE LOWER(u.email) = ?
@@ -348,6 +383,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       const formattedCode = `${rawCode.slice(0, 4)}-${rawCode.slice(4, 8)}`;
       const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
       const ip = getClientIp(req);
+      const businessId = String(user.business_id || DEFAULT_BUSINESS_ID);
 
       withTransaction(db, () => {
         db.prepare(
@@ -360,10 +396,11 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         `).run(generateId('prt'), String(user.id), sha256(rawCode), expiresAt, ip);
 
         db.prepare(`
-          INSERT INTO notifications (id, type, severity, title, message, metadata)
-          VALUES (?, 'SECURITY', 'WARN', 'Staff Password Reset Requested', ?, ?)
+          INSERT INTO notifications (id, business_id, type, severity, title, message, metadata)
+          VALUES (?, ?, 'SECURITY', 'WARN', 'Staff Password Reset Requested', ?, ?)
         `).run(
           generateId('ntf'),
+          businessId,
           `A password reset was requested for ${String(user.email)} from IP ${ip}.`,
           JSON.stringify({ email: String(user.email), expiresAt })
         );
@@ -371,7 +408,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
       recordAuditLog(
         db,
-        { id: String(user.id), email: String(user.email), role: String(user.role) },
+        { id: String(user.id), businessId, email: String(user.email), role: String(user.role) },
         'PASSWORD_RESET_REQUESTED',
         'AdminUser',
         String(user.id),
@@ -380,7 +417,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       io?.emit('notification:new', { type: 'SECURITY' });
 
       const resendKey = process.env.RESEND_API_KEY?.trim();
-      const mailFrom = process.env.MAIL_FROM?.trim() || 'NETCO Security <no-reply@netco.co.tz>';
+      const mailFrom = process.env.MAIL_FROM?.trim() || 'TRAX LINK Security <no-reply@traxlink.co.tz>';
       if (resendKey) {
         try {
           const mailRes = await fetch('https://api.resend.com/emails', {
@@ -392,8 +429,8 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
             body: JSON.stringify({
               from: mailFrom,
               to: [String(user.email)],
-              subject: 'NETCO Staff Password Recovery Code',
-              text: `Your NETCO one-time password recovery code is: ${formattedCode}\n\nThis code expires in 15 minutes.`,
+              subject: 'TRAX LINK Password Recovery Code',
+              text: `Your TRAX LINK one-time password recovery code is: ${formattedCode}\n\nThis code expires in 15 minutes.`,
             }),
           });
           emailSent = mailRes.ok;
@@ -432,7 +469,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     const user = db
       .prepare(`
-        SELECT u.id, u.email, u.role, u.is_active, st.is_suspended
+        SELECT u.id, u.business_id, u.email, u.role, u.is_active, st.is_suspended
         FROM admin_users u
         LEFT JOIN staff st ON st.admin_user_id = u.id
         WHERE LOWER(u.email) = ?
@@ -471,7 +508,12 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     recordAuditLog(
       db,
-      { id: String(user.id), email: String(user.email), role: String(user.role) },
+      {
+        id: String(user.id),
+        businessId: String(user.business_id || DEFAULT_BUSINESS_ID),
+        email: String(user.email),
+        role: String(user.role),
+      },
       'PASSWORD_RESET_COMPLETED',
       'AdminUser',
       String(user.id),
@@ -484,17 +526,28 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   // =========================================================================
   // PUBLIC CUSTOMER HOTSPOT CAPTIVE PORTAL
   // =========================================================================
-  app.get('/api/portal/packages', (_req, res) => {
-    const packages = db
-      .prepare(`
-        SELECT id, name, description, category, price_tzs as priceTzs,
-               duration_minutes as durationMinutes, download_kbps as downloadKbps,
-               upload_kbps as uploadKbps, data_limit_mb as dataLimitMb, validity_days as validityDays
-        FROM packages
-        WHERE is_active = 1
-        ORDER BY price_tzs ASC
-      `)
-      .all();
+  app.get('/api/portal/packages', (req, res) => {
+    const bizFilter = typeof req.query.business === 'string' ? req.query.business.trim() : '';
+    let sql = `
+      SELECT pk.id, pk.business_id as businessId, b.name as businessName, b.slug as businessSlug,
+             pk.name, pk.description, pk.category, pk.package_type as packageType,
+             pk.price_tzs as priceTzs, pk.currency,
+             pk.duration_minutes as durationMinutes, pk.download_kbps as downloadKbps,
+             pk.upload_kbps as uploadKbps, pk.data_limit_mb as dataLimitMb,
+             pk.device_limit as deviceLimit, pk.simultaneous_sessions as simultaneousSessions,
+             pk.fup_policy as fupPolicy, pk.validity_days as validityDays
+      FROM packages pk
+      JOIN businesses b ON b.id = pk.business_id
+      WHERE pk.is_active = 1 AND b.status = 'ACTIVE'
+    `;
+    const params: string[] = [];
+    if (bizFilter) {
+      sql += ' AND (b.id = ? OR b.slug = ?)';
+      params.push(bizFilter, bizFilter);
+    }
+    sql += ' ORDER BY pk.price_tzs ASC';
+
+    const packages = db.prepare(sql).all(...params);
     res.json({ packages });
   });
 
@@ -546,11 +599,12 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
       emitEvent(io, 'session:started', {
         sessionId: result.sessionId,
+        businessId: result.businessId,
         voucherId: result.voucherId,
         packageName: result.packageName,
         reconnected: result.reconnected,
       });
-      emitEvent(io, 'notification:new', { type: 'VOUCHER_ACTIVATED' });
+      emitEvent(io, 'notification:new', { type: 'VOUCHER_ACTIVATED', businessId: result.businessId });
 
       res.json({ session: { ...result, operatingMode: getOperatingMode(db) } });
     } catch (err) {
@@ -581,11 +635,12 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         SELECT s.*, v.code_masked, v.is_test as voucher_is_test, v.bound_device_name,
                p.name as package_name, p.category,
                p.download_kbps, p.upload_kbps, p.data_limit_mb,
-               d.device_label, d.device_fingerprint
+               d.device_label, d.device_fingerprint, b.name as business_name
         FROM sessions s
         JOIN vouchers v ON v.id = s.voucher_id
         JOIN packages p ON p.id = v.package_id
         JOIN devices d ON d.id = s.device_id
+        LEFT JOIN businesses b ON b.id = s.business_id
         WHERE s.session_token = ?
       `)
       .get(token) as Record<string, unknown> | undefined;
@@ -602,6 +657,8 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({
       session: {
         sessionId: String(row.id),
+        businessId: String(row.business_id || DEFAULT_BUSINESS_ID),
+        businessName: row.business_name ? String(row.business_name) : 'TRAX LINK Hotspot',
         status: String(row.status),
         codeMasked: String(row.code_masked),
         packageName: String(row.package_name),
@@ -673,9 +730,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   app.post('/api/portal/payments/initiate', portalLimiter, (req, res) => {
     const schema = z.object({
       packageId: z.string().min(1).max(64),
-      provider: z.enum(['MPESA', 'AIRTEL_MONEY', 'TIGO_PESA', 'HALOPESA']),
-      phoneNumber: z.string().min(9).max(20),
+      provider: z.enum(['MPESA', 'AIRTEL_MONEY', 'TIGO_PESA', 'HALOPESA', 'CARD']),
+      phoneNumber: z.string().min(4).max(80),
       customerId: z.string().optional().nullable(),
+      businessId: z.string().optional().nullable(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -684,7 +742,11 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     try {
       const payment = initiatePayment(db, parsed.data);
-      emitEvent(io, 'payment:updated', { reference: payment.reference, status: payment.status });
+      emitEvent(io, 'payment:updated', {
+        reference: payment.reference,
+        status: payment.status,
+        businessId: payment.businessId,
+      });
       res.status(201).json({ payment });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to initiate payment' });
@@ -698,9 +760,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         reference: payment.reference,
         status: payment.status,
         receiptNumber: payment.receiptNumber,
+        businessId: payment.businessId,
       });
       emitEvent(io, 'voucher:updated', { source: 'standalone-payment', reference: payment.reference });
-      emitEvent(io, 'notification:new', { type: 'STANDALONE_TOKEN_ISSUED' });
+      emitEvent(io, 'notification:new', { type: 'STANDALONE_TOKEN_ISSUED', businessId: payment.businessId });
       res.json({ payment });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to confirm standalone payment' });
@@ -710,7 +773,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   app.get('/api/portal/payments/:reference', (req, res) => {
     const row = db
       .prepare(`
-        SELECT p.id, p.reference, p.receipt_number as receiptNumber, p.provider,
+        SELECT p.id, p.business_id as businessId, p.reference, p.receipt_number as receiptNumber, p.provider,
                p.phone_number as phoneNumber, p.amount_tzs as amountTzs,
                p.status, p.is_test as isTest, p.payment_mode as paymentMode,
                p.verified_at as verifiedAt, p.created_at as createdAt,
@@ -734,6 +797,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({
       payment: {
         id: row.id,
+        businessId: row.businessId,
         reference: row.reference,
         receiptNumber: row.receiptNumber,
         provider: row.provider,
@@ -753,9 +817,9 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   // =========================================================================
   // SERVER-SIDE PAYMENT PROVIDER WEBHOOK CALLBACKS
   // =========================================================================
-  app.post('/api/payments/webhook/:provider', (req: express.Request & { rawBody?: string }, res) => {
+  app.post('/api/payments/webhook/:provider', async (req: express.Request & { rawBody?: string }, res) => {
     const providerParam = req.params.provider?.toUpperCase() as MobileMoneyProvider;
-    if (!['MPESA', 'AIRTEL_MONEY', 'TIGO_PESA', 'HALOPESA'].includes(providerParam)) {
+    if (!['MPESA', 'AIRTEL_MONEY', 'TIGO_PESA', 'HALOPESA', 'CARD'].includes(providerParam)) {
       return res.status(400).json({ error: 'Unsupported payment provider' });
     }
 
@@ -782,7 +846,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     }
 
     try {
-      const outcome = processVerifiedPaymentCallback(db, {
+      const outcome = await processVerifiedPaymentCallback(db, {
         provider: providerParam,
         externalEventId: parsed.data.externalEventId,
         reference: parsed.data.reference,
@@ -794,10 +858,11 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
       emitEvent(io, 'payment:updated', {
         reference: outcome.reference,
+        businessId: outcome.businessId,
         status: outcome.status,
         receiptNumber: outcome.receiptNumber,
       });
-      emitEvent(io, 'notification:new', { type: 'PAYMENT_WEBHOOK' });
+      emitEvent(io, 'notification:new', { type: 'PAYMENT_WEBHOOK', businessId: outcome.businessId });
 
       res.json({ ok: true, outcome });
     } catch (err) {
@@ -806,28 +871,32 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   });
 
   // =========================================================================
-  // ADMIN DASHBOARD
+  // TENANT DASHBOARD SUMMARY (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/dashboard/summary', requireAuth, (_req, res) => {
+  app.get('/api/dashboard/summary', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     expireStaleRecords(db);
+    const bizId = scope.businessId;
 
     const totalCustomers = Number(
-      (db.prepare('SELECT COUNT(*) as c FROM customers').get() as { c: number }).c
+      (db.prepare('SELECT COUNT(*) as c FROM customers WHERE business_id = ?').get(bizId) as { c: number }).c
     );
     const onlineCustomers = Number(
       (
         db
-          .prepare("SELECT COUNT(DISTINCT COALESCE(customer_id, device_id)) as c FROM sessions WHERE status = 'ACTIVE'")
-          .get() as { c: number }
+          .prepare(
+            "SELECT COUNT(DISTINCT COALESCE(customer_id, device_id)) as c FROM sessions WHERE business_id = ? AND status = 'ACTIVE'"
+          )
+          .get(bizId) as { c: number }
       ).c
     );
     const offlineCustomers = Math.max(0, totalCustomers - onlineCustomers);
 
     const voucherCounts = db
-      .prepare(`
-        SELECT status, COUNT(*) as c FROM vouchers GROUP BY status
-      `)
-      .all() as Array<{ status: string; c: number }>;
+      .prepare('SELECT status, COUNT(*) as c FROM vouchers WHERE business_id = ? GROUP BY status')
+      .all(bizId) as Array<{ status: string; c: number }>;
     const vMap: Record<string, number> = { UNUSED: 0, ACTIVE: 0, EXPIRED: 0, REVOKED: 0 };
     for (const row of voucherCounts) {
       vMap[row.status] = Number(row.c);
@@ -842,43 +911,70 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       (
         db
           .prepare(
-            "SELECT COALESCE(SUM(amount_tzs), 0) as s FROM payments WHERE status = 'COMPLETED' AND is_test = 0 AND verified_at >= ?"
+            "SELECT COALESCE(SUM(amount_tzs), 0) as s FROM payments WHERE business_id = ? AND status = 'COMPLETED' AND is_test = 0 AND verified_at >= ?"
           )
-          .get(startOfDay) as { s: number }
+          .get(bizId, startOfDay) as { s: number }
       ).s
     );
     const weeklyRevenueTzs = Number(
       (
         db
           .prepare(
-            "SELECT COALESCE(SUM(amount_tzs), 0) as s FROM payments WHERE status = 'COMPLETED' AND is_test = 0 AND verified_at >= ?"
+            "SELECT COALESCE(SUM(amount_tzs), 0) as s FROM payments WHERE business_id = ? AND status = 'COMPLETED' AND is_test = 0 AND verified_at >= ?"
           )
-          .get(startOfWeek) as { s: number }
+          .get(bizId, startOfWeek) as { s: number }
       ).s
     );
     const monthlyRevenueTzs = Number(
       (
         db
           .prepare(
-            "SELECT COALESCE(SUM(amount_tzs), 0) as s FROM payments WHERE status = 'COMPLETED' AND is_test = 0 AND verified_at >= ?"
+            "SELECT COALESCE(SUM(amount_tzs), 0) as s FROM payments WHERE business_id = ? AND status = 'COMPLETED' AND is_test = 0 AND verified_at >= ?"
           )
-          .get(startOfMonth) as { s: number }
+          .get(bizId, startOfMonth) as { s: number }
       ).s
     );
+    const totalRevenueTzs = Number(
+      (
+        db
+          .prepare(
+            "SELECT COALESCE(SUM(amount_tzs), 0) as s FROM payments WHERE business_id = ? AND status = 'COMPLETED' AND is_test = 0"
+          )
+          .get(bizId) as { s: number }
+      ).s
+    );
+    const pendingPaymentsCount = Number(
+      (db.prepare("SELECT COUNT(*) as c FROM payments WHERE business_id = ? AND status = 'PENDING'").get(bizId) as { c: number }).c
+    );
+    const activeSubscriptionsCount = Number(
+      (db.prepare("SELECT COUNT(*) as c FROM subscriptions WHERE business_id = ? AND status = 'ACTIVE'").get(bizId) as { c: number }).c
+    );
+    const expiredSubscriptionsCount = Number(
+      (db.prepare("SELECT COUNT(*) as c FROM subscriptions WHERE business_id = ? AND status = 'EXPIRED'").get(bizId) as { c: number }).c
+    );
     const testVouchersCount = Number(
-      (db.prepare('SELECT COUNT(*) as c FROM vouchers WHERE is_test = 1').get() as { c: number }).c
+      (db.prepare('SELECT COUNT(*) as c FROM vouchers WHERE business_id = ? AND is_test = 1').get(bizId) as { c: number }).c
     );
     const testPaymentsCount = Number(
-      (db.prepare("SELECT COUNT(*) as c FROM payments WHERE is_test = 1 AND status = 'COMPLETED'").get() as { c: number }).c
+      (
+        db
+          .prepare("SELECT COUNT(*) as c FROM payments WHERE business_id = ? AND is_test = 1 AND status = 'COMPLETED'")
+          .get(bizId) as { c: number }
+      ).c
     );
 
     const bwRow = db
-      .prepare('SELECT COALESCE(SUM(bytes_in), 0) as rx, COALESCE(SUM(bytes_out), 0) as tx FROM sessions')
-      .get() as { rx: number; tx: number };
+      .prepare('SELECT COALESCE(SUM(bytes_in), 0) as rx, COALESCE(SUM(bytes_out), 0) as tx FROM sessions WHERE business_id = ?')
+      .get(bizId) as { rx: number; tx: number };
 
     const routerIfRow = db
-      .prepare('SELECT COALESCE(SUM(rx_bytes), 0) as rx, COALESCE(SUM(tx_bytes), 0) as tx FROM router_interfaces')
-      .get() as { rx: number; tx: number };
+      .prepare(`
+        SELECT COALESCE(SUM(ri.rx_bytes), 0) as rx, COALESCE(SUM(ri.tx_bytes), 0) as tx
+        FROM router_interfaces ri
+        JOIN routers r ON r.id = ri.router_id
+        WHERE r.business_id = ?
+      `)
+      .get(bizId) as { rx: number; tx: number };
 
     const routers = db
       .prepare(`
@@ -887,44 +983,49 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
                uptime, board_name as boardName, router_os_version as routerOsVersion,
                last_error as lastError, last_checked_at as lastCheckedAt
         FROM routers
+        WHERE business_id = ?
         ORDER BY created_at DESC
       `)
-      .all();
+      .all(bizId);
 
     const recentActivities = db
       .prepare(`
         SELECT id, actor_email as actorEmail, actor_role as actorRole, action,
                entity_type as entityType, entity_id as entityId, created_at as createdAt
         FROM audit_logs
+        WHERE business_id = ?
         ORDER BY created_at DESC
         LIMIT 12
       `)
-      .all();
+      .all(bizId);
 
-    // Daily verified real revenue series for last 7 days (excludes test/standalone tokens)
     const dailySeries = db
       .prepare(`
         SELECT substr(verified_at, 1, 10) as day,
                COALESCE(SUM(amount_tzs), 0) as revenueTzs,
                COUNT(*) as txCount
         FROM payments
-        WHERE status = 'COMPLETED' AND is_test = 0 AND verified_at >= ?
+        WHERE business_id = ? AND status = 'COMPLETED' AND is_test = 0 AND verified_at >= ?
         GROUP BY substr(verified_at, 1, 10)
         ORDER BY day ASC
       `)
-      .all(startOfWeek);
+      .all(bizId, startOfWeek);
 
     const activeSessionsCount = Number(
-      (db.prepare("SELECT COUNT(*) as c FROM sessions WHERE status = 'ACTIVE'").get() as { c: number }).c
+      (db.prepare("SELECT COUNT(*) as c FROM sessions WHERE business_id = ? AND status = 'ACTIVE'").get(bizId) as { c: number }).c
     );
 
     res.json({
+      businessId: bizId,
       operatingMode: getOperatingMode(db),
       stats: {
         totalCustomers,
         onlineCustomers,
         offlineCustomers,
         activeSessionsCount,
+        activeSubscriptionsCount,
+        expiredSubscriptionsCount,
+        pendingPaymentsCount,
         activeVouchers: vMap.ACTIVE,
         unusedVouchers: vMap.UNUSED,
         expiredVouchers: vMap.EXPIRED,
@@ -934,6 +1035,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         dailyRevenueTzs,
         weeklyRevenueTzs,
         monthlyRevenueTzs,
+        totalRevenueTzs,
         totalRxBytes: Number(bwRow.rx) + Number(routerIfRow.rx),
         totalTxBytes: Number(bwRow.tx) + Number(routerIfRow.tx),
       },
@@ -944,9 +1046,12 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   });
 
   // =========================================================================
-  // CUSTOMERS
+  // CUSTOMERS (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/customers', requireAuth, (req, res) => {
+  app.get('/api/customers', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const status = typeof req.query.status === 'string' ? req.query.status : 'ALL';
 
@@ -956,11 +1061,11 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
              (SELECT COUNT(*) FROM vouchers v WHERE v.customer_id = c.id) as voucher_count
       FROM customers c
       LEFT JOIN packages p ON p.id = c.package_id
-      WHERE 1=1
+      WHERE c.business_id = ?
     `;
-    const params: string[] = [];
+    const params: string[] = [scope.businessId];
     if (q) {
-      sql += ' AND (c.full_name LIKE ? OR c.phone LIKE ? OR c.customer_code LIKE ? OR COALESCE(c.email, \'\') LIKE ?)';
+      sql += " AND (c.full_name LIKE ? OR c.phone LIKE ? OR c.customer_code LIKE ? OR COALESCE(c.email, '') LIKE ?)";
       const like = `%${q}%`;
       params.push(like, like, like, like);
     }
@@ -975,7 +1080,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ customers: rows });
   });
 
-  app.get('/api/customers/:id', requireAuth, (req, res) => {
+  app.get('/api/customers/:id', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const customer = db
       .prepare(`
         SELECT c.*, p.name as package_name
@@ -983,20 +1091,27 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         LEFT JOIN packages p ON p.id = c.package_id
         WHERE c.id = ?
       `)
-      .get(req.params.id);
+      .get(req.params.id) as Record<string, unknown> | undefined;
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
+    if (String(customer.business_id) !== scope.businessId) {
+      if (req.actor) {
+        recordAuditLog(db, req.actor, 'CROSS_TENANT_ACCESS_BLOCKED', 'Customer', req.params.id, getClientIp(req));
+      }
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
+
     const vouchers = db
       .prepare(`
         SELECT v.id, v.code_masked as codeMasked, v.status, v.activated_at as activatedAt,
                v.expires_at as expiresAt, v.created_at as createdAt, p.name as packageName
         FROM vouchers v
         JOIN packages p ON p.id = v.package_id
-        WHERE v.customer_id = ?
+        WHERE v.customer_id = ? AND v.business_id = ?
         ORDER BY v.created_at DESC
       `)
-      .all(req.params.id);
+      .all(req.params.id, scope.businessId);
 
     const sessions = db
       .prepare(`
@@ -1005,15 +1120,18 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
                d.device_label as deviceLabel, d.device_fingerprint as deviceFingerprint
         FROM sessions s
         JOIN devices d ON d.id = s.device_id
-        WHERE s.customer_id = ?
+        WHERE s.customer_id = ? AND s.business_id = ?
         ORDER BY s.started_at DESC
       `)
-      .all(req.params.id);
+      .all(req.params.id, scope.businessId);
 
     res.json({ customer, vouchers, sessions });
   });
 
-  app.post('/api/customers', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'CASHIER'), (req: AuthedRequest, res) => {
+  app.post('/api/customers', requireAuth, requireRole(...FINANCE_ROLES, 'SUPPORT_STAFF'), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const schema = z.object({
       fullName: z.string().min(2).max(120),
       phone: z.string().min(8).max(24),
@@ -1031,10 +1149,11 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     const nowIso = new Date().toISOString();
 
     db.prepare(`
-      INSERT INTO customers (id, customer_code, full_name, phone, email, notes, is_active, package_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      INSERT INTO customers (id, business_id, customer_code, full_name, phone, email, notes, is_active, package_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
     `).run(
       id,
+      scope.businessId,
       code,
       parsed.data.fullName.trim(),
       parsed.data.phone.trim(),
@@ -1055,9 +1174,15 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.status(201).json({ customer: created });
   });
 
-  app.patch('/api/customers/:id', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'CASHIER'), (req: AuthedRequest, res) => {
-    const existing = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+  app.patch('/api/customers/:id', requireAuth, requireRole(...FINANCE_ROLES, 'SUPPORT_STAFF'), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const existing = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
     if (!existing) return res.status(404).json({ error: 'Customer not found' });
+    if (String(existing.business_id) !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
 
     const schema = z.object({
       fullName: z.string().min(2).max(120).optional(),
@@ -1082,7 +1207,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
           notes = CASE WHEN ? IS NOT NULL THEN ? ELSE notes END,
           is_active = COALESCE(?, is_active),
           updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND business_id = ?
     `).run(
       parsed.data.fullName?.trim() ?? null,
       parsed.data.phone?.trim() ?? null,
@@ -1094,7 +1219,8 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       parsed.data.notes?.trim() || null,
       parsed.data.isActive !== undefined ? (parsed.data.isActive ? 1 : 0) : null,
       nowIso,
-      req.params.id
+      req.params.id,
+      scope.businessId
     );
 
     if (req.actor) {
@@ -1105,15 +1231,24 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ customer: updated });
   });
 
-  app.delete('/api/customers/:id', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
-    const existing = db.prepare('SELECT id FROM customers WHERE id = ?').get(req.params.id);
+  app.delete('/api/customers/:id', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const existing = db.prepare('SELECT id, business_id FROM customers WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string }
+      | undefined;
     if (!existing) return res.status(404).json({ error: 'Customer not found' });
+    if (existing.business_id !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
 
     const hasPayments = db.prepare('SELECT 1 FROM payments WHERE customer_id = ? LIMIT 1').get(req.params.id);
     if (hasPayments) {
-      db.prepare('UPDATE customers SET is_active = 0, updated_at = ? WHERE id = ?').run(
+      db.prepare('UPDATE customers SET is_active = 0, updated_at = ? WHERE id = ? AND business_id = ?').run(
         new Date().toISOString(),
-        req.params.id
+        req.params.id,
+        scope.businessId
       );
       if (req.actor) {
         recordAuditLog(db, req.actor, 'CUSTOMER_DEACTIVATED', 'Customer', req.params.id, getClientIp(req));
@@ -1121,7 +1256,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       return res.json({ ok: true, mode: 'DEACTIVATED' });
     }
 
-    db.prepare('DELETE FROM customers WHERE id = ?').run(req.params.id);
+    db.prepare('DELETE FROM customers WHERE id = ? AND business_id = ?').run(req.params.id, scope.businessId);
     if (req.actor) {
       recordAuditLog(db, req.actor, 'CUSTOMER_DELETED', 'Customer', req.params.id, getClientIp(req));
     }
@@ -1129,33 +1264,48 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   });
 
   // =========================================================================
-  // PACKAGES
+  // PACKAGES (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/packages', requireAuth, (_req, res) => {
+  app.get('/api/packages', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const rows = db
       .prepare(`
-        SELECT id, name, description, category, price_tzs as priceTzs,
+        SELECT id, business_id as businessId, location_id as locationId, name, description, category,
+               package_type as packageType, price_tzs as priceTzs, currency,
                duration_minutes as durationMinutes, download_kbps as downloadKbps,
                upload_kbps as uploadKbps, data_limit_mb as dataLimitMb,
-               validity_days as validityDays, is_active as isActive,
+               device_limit as deviceLimit, simultaneous_sessions as simultaneousSessions,
+               fup_policy as fupPolicy, validity_days as validityDays, is_active as isActive,
                created_at as createdAt, updated_at as updatedAt
         FROM packages
+        WHERE business_id = ?
         ORDER BY price_tzs ASC
       `)
-      .all();
+      .all(scope.businessId);
     res.json({ packages: rows });
   });
 
-  app.post('/api/packages', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
+  app.post('/api/packages', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const schema = z.object({
       name: z.string().min(2).max(80),
       description: z.string().max(300).optional().nullable(),
       category: z.enum(['HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY']),
+      packageType: z.enum(['TIME_BASED', 'DATA_BASED', 'HYBRID', 'BANDWIDTH_PROFILE']).default('TIME_BASED'),
       priceTzs: z.number().int().min(0).max(100_000_000),
+      currency: z.string().min(3).max(8).default('TZS'),
       durationMinutes: z.number().int().min(1).max(525_600),
       downloadKbps: z.number().int().min(64).max(10_000_000),
       uploadKbps: z.number().int().min(64).max(10_000_000),
       dataLimitMb: z.number().int().min(1).max(10_000_000).optional().nullable(),
+      deviceLimit: z.number().int().min(1).max(50).default(1),
+      simultaneousSessions: z.number().int().min(1).max(50).default(1),
+      fupPolicy: z.string().max(240).optional().nullable(),
+      locationId: z.string().max(64).optional().nullable(),
       validityDays: z.number().int().min(1).max(3650).default(30),
       isActive: z.boolean().default(true),
     });
@@ -1164,28 +1314,38 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       return res.status(400).json({ error: 'Invalid package fields', issues: parsed.error.issues });
     }
 
-    const dup = db.prepare('SELECT id FROM packages WHERE LOWER(name) = LOWER(?)').get(parsed.data.name.trim());
+    const dup = db
+      .prepare('SELECT id FROM packages WHERE business_id = ? AND LOWER(name) = LOWER(?)')
+      .get(scope.businessId, parsed.data.name.trim());
     if (dup) {
-      return res.status(409).json({ error: 'A package with this name already exists' });
+      return res.status(409).json({ error: 'A package with this name already exists in your workspace' });
     }
 
     const id = generateId('pkg');
     const nowIso = new Date().toISOString();
     db.prepare(`
       INSERT INTO packages (
-        id, name, description, category, price_tzs, duration_minutes,
-        download_kbps, upload_kbps, data_limit_mb, validity_days, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, business_id, location_id, name, description, category, package_type, price_tzs, currency,
+        duration_minutes, download_kbps, upload_kbps, data_limit_mb, device_limit, simultaneous_sessions,
+        fup_policy, validity_days, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      scope.businessId,
+      parsed.data.locationId?.trim() || null,
       parsed.data.name.trim(),
       parsed.data.description?.trim() || null,
       parsed.data.category,
+      parsed.data.packageType,
       parsed.data.priceTzs,
+      parsed.data.currency.toUpperCase(),
       parsed.data.durationMinutes,
       parsed.data.downloadKbps,
       parsed.data.uploadKbps,
       parsed.data.dataLimitMb ?? null,
+      parsed.data.deviceLimit,
+      parsed.data.simultaneousSessions,
+      parsed.data.fupPolicy?.trim() || null,
       parsed.data.validityDays,
       parsed.data.isActive ? 1 : 0,
       nowIso,
@@ -1201,29 +1361,41 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     const created = db
       .prepare(`
-        SELECT id, name, description, category, price_tzs as priceTzs,
+        SELECT id, business_id as businessId, location_id as locationId, name, description, category,
+               package_type as packageType, price_tzs as priceTzs, currency,
                duration_minutes as durationMinutes, download_kbps as downloadKbps,
                upload_kbps as uploadKbps, data_limit_mb as dataLimitMb,
-               validity_days as validityDays, is_active as isActive, created_at as createdAt
+               device_limit as deviceLimit, simultaneous_sessions as simultaneousSessions,
+               fup_policy as fupPolicy, validity_days as validityDays, is_active as isActive, created_at as createdAt
         FROM packages WHERE id = ?
       `)
       .get(id);
     res.status(201).json({ package: created });
   });
 
-  app.patch('/api/packages/:id', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
-    const existing = db.prepare('SELECT * FROM packages WHERE id = ?').get(req.params.id);
+  app.patch('/api/packages/:id', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const existing = db.prepare('SELECT * FROM packages WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
     if (!existing) return res.status(404).json({ error: 'Package not found' });
+    if (String(existing.business_id) !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
 
     const schema = z.object({
       name: z.string().min(2).max(80).optional(),
       description: z.string().max(300).optional().nullable(),
       category: z.enum(['HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY']).optional(),
+      packageType: z.enum(['TIME_BASED', 'DATA_BASED', 'HYBRID', 'BANDWIDTH_PROFILE']).optional(),
       priceTzs: z.number().int().min(0).max(100_000_000).optional(),
       durationMinutes: z.number().int().min(1).max(525_600).optional(),
       downloadKbps: z.number().int().min(64).max(10_000_000).optional(),
       uploadKbps: z.number().int().min(64).max(10_000_000).optional(),
       dataLimitMb: z.number().int().min(1).max(10_000_000).optional().nullable(),
+      deviceLimit: z.number().int().min(1).max(50).optional(),
+      simultaneousSessions: z.number().int().min(1).max(50).optional(),
+      fupPolicy: z.string().max(240).optional().nullable(),
       validityDays: z.number().int().min(1).max(3650).optional(),
       isActive: z.boolean().optional(),
     });
@@ -1238,30 +1410,40 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       SET name = COALESCE(?, name),
           description = CASE WHEN ? IS NOT NULL THEN ? ELSE description END,
           category = COALESCE(?, category),
+          package_type = COALESCE(?, package_type),
           price_tzs = COALESCE(?, price_tzs),
           duration_minutes = COALESCE(?, duration_minutes),
           download_kbps = COALESCE(?, download_kbps),
           upload_kbps = COALESCE(?, upload_kbps),
           data_limit_mb = CASE WHEN ? IS NOT NULL THEN ? ELSE data_limit_mb END,
+          device_limit = COALESCE(?, device_limit),
+          simultaneous_sessions = COALESCE(?, simultaneous_sessions),
+          fup_policy = CASE WHEN ? IS NOT NULL THEN ? ELSE fup_policy END,
           validity_days = COALESCE(?, validity_days),
           is_active = COALESCE(?, is_active),
           updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND business_id = ?
     `).run(
       parsed.data.name?.trim() ?? null,
       parsed.data.description !== undefined ? 'set' : null,
       parsed.data.description?.trim() || null,
       parsed.data.category ?? null,
+      parsed.data.packageType ?? null,
       parsed.data.priceTzs ?? null,
       parsed.data.durationMinutes ?? null,
       parsed.data.downloadKbps ?? null,
       parsed.data.uploadKbps ?? null,
       parsed.data.dataLimitMb !== undefined ? 'set' : null,
       parsed.data.dataLimitMb ?? null,
+      parsed.data.deviceLimit ?? null,
+      parsed.data.simultaneousSessions ?? null,
+      parsed.data.fupPolicy !== undefined ? 'set' : null,
+      parsed.data.fupPolicy?.trim() || null,
       parsed.data.validityDays ?? null,
       parsed.data.isActive !== undefined ? (parsed.data.isActive ? 1 : 0) : null,
       nowIso,
-      req.params.id
+      req.params.id,
+      scope.businessId
     );
 
     if (req.actor) {
@@ -1270,9 +1452,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     const updated = db
       .prepare(`
-        SELECT id, name, description, category, price_tzs as priceTzs,
-               duration_minutes as durationMinutes, download_kbps as downloadKbps,
-               upload_kbps as uploadKbps, data_limit_mb as dataLimitMb,
+        SELECT id, business_id as businessId, name, description, category, package_type as packageType,
+               price_tzs as priceTzs, currency, duration_minutes as durationMinutes, download_kbps as downloadKbps,
+               upload_kbps as uploadKbps, data_limit_mb as dataLimitMb, device_limit as deviceLimit,
+               simultaneous_sessions as simultaneousSessions, fup_policy as fupPolicy,
                validity_days as validityDays, is_active as isActive, updated_at as updatedAt
         FROM packages WHERE id = ?
       `)
@@ -1280,20 +1463,29 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ package: updated });
   });
 
-  app.delete('/api/packages/:id', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
-    const existing = db.prepare('SELECT id FROM packages WHERE id = ?').get(req.params.id);
+  app.delete('/api/packages/:id', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const existing = db.prepare('SELECT id, business_id FROM packages WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string }
+      | undefined;
     if (!existing) return res.status(404).json({ error: 'Package not found' });
+    if (existing.business_id !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
 
     const inUse = db.prepare('SELECT 1 FROM vouchers WHERE package_id = ? LIMIT 1').get(req.params.id);
     if (inUse) {
-      db.prepare('UPDATE packages SET is_active = 0, updated_at = ? WHERE id = ?').run(
+      db.prepare('UPDATE packages SET is_active = 0, updated_at = ? WHERE id = ? AND business_id = ?').run(
         new Date().toISOString(),
-        req.params.id
+        req.params.id,
+        scope.businessId
       );
       return res.json({ ok: true, mode: 'DEACTIVATED' });
     }
 
-    db.prepare('DELETE FROM packages WHERE id = ?').run(req.params.id);
+    db.prepare('DELETE FROM packages WHERE id = ? AND business_id = ?').run(req.params.id, scope.businessId);
     if (req.actor) {
       recordAuditLog(db, req.actor, 'PACKAGE_DELETED', 'Package', req.params.id, getClientIp(req));
     }
@@ -1301,9 +1493,12 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   });
 
   // =========================================================================
-  // VOUCHERS
+  // VOUCHERS (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/vouchers', requireAuth, (req, res) => {
+  app.get('/api/vouchers', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     expireStaleRecords(db);
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const status = typeof req.query.status === 'string' ? req.query.status : 'ALL';
@@ -1322,9 +1517,9 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       FROM vouchers v
       JOIN packages p ON p.id = v.package_id
       LEFT JOIN customers c ON c.id = v.customer_id
-      WHERE 1=1
+      WHERE v.business_id = ?
     `;
-    const params: string[] = [];
+    const params: string[] = [scope.businessId];
     if (status !== 'ALL') {
       sql += ' AND v.status = ?';
       params.push(status);
@@ -1357,7 +1552,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ vouchers });
   });
 
-  app.post('/api/vouchers/generate', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'CASHIER'), (req: AuthedRequest, res) => {
+  app.post('/api/vouchers/generate', requireAuth, requireRole(...FINANCE_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const schema = z.object({
       packageId: z.string().min(1).max(64),
       count: z.number().int().min(1).max(500).default(1),
@@ -1376,6 +1574,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         count: parsed.data.count,
         customerId: parsed.data.customerId?.trim() || null,
         createdById: req.actor?.id ?? null,
+        businessId: scope.businessId,
         isTest: parsed.data.isTest,
         testNote: parsed.data.testNote ?? null,
       });
@@ -1388,7 +1587,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         });
       }
 
-      emitEvent(io, 'voucher:updated', { count: result.vouchers.length, batchId: result.batchId });
+      emitEvent(io, 'voucher:updated', { count: result.vouchers.length, batchId: result.batchId, businessId: scope.businessId });
       res.status(201).json(result);
     } catch (err) {
       if (err instanceof VoucherError) {
@@ -1398,7 +1597,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     }
   });
 
-  app.post('/api/vouchers/:id/revoke', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), async (req: AuthedRequest, res) => {
+  app.post('/api/vouchers/:id/revoke', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), async (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const schema = z.object({
       reason: z.string().min(2).max(240).default('Revoked by administrator'),
     });
@@ -1409,6 +1611,9 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     const voucher = db.prepare('SELECT * FROM vouchers WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
     if (!voucher) return res.status(404).json({ error: 'Voucher not found' });
+    if (String(voucher.business_id) !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
 
     const nowIso = new Date().toISOString();
     const activeSessions = db
@@ -1418,13 +1623,18 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     withTransaction(db, () => {
       db.prepare(`
         UPDATE vouchers SET status = 'REVOKED', revoked_at = ?, revoked_reason = ?, updated_at = ?
-        WHERE id = ?
-      `).run(nowIso, parsed.data.reason, nowIso, req.params.id);
+        WHERE id = ? AND business_id = ?
+      `).run(nowIso, parsed.data.reason, nowIso, req.params.id, scope.businessId);
 
       db.prepare(`
         UPDATE sessions SET status = 'TERMINATED', ended_at = ?, end_reason = ?
         WHERE voucher_id = ? AND status = 'ACTIVE'
       `).run(nowIso, `Voucher revoked: ${parsed.data.reason}`, req.params.id);
+
+      db.prepare(`
+        UPDATE subscriptions SET status = 'SUSPENDED', revoked_at = ?, updated_at = ?
+        WHERE voucher_id = ? AND status = 'ACTIVE'
+      `).run(nowIso, nowIso, req.params.id);
     });
 
     for (const s of activeSessions) {
@@ -1439,11 +1649,22 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       });
     }
 
-    emitEvent(io, 'voucher:updated', { voucherId: req.params.id, status: 'REVOKED' });
+    emitEvent(io, 'voucher:updated', { voucherId: req.params.id, status: 'REVOKED', businessId: scope.businessId });
     res.json({ ok: true });
   });
 
-  app.get('/api/vouchers/:id/redemptions', requireAuth, (req, res) => {
+  app.get('/api/vouchers/:id/redemptions', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const voucher = db.prepare('SELECT id, business_id FROM vouchers WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string }
+      | undefined;
+    if (!voucher) return res.status(404).json({ error: 'Voucher not found' });
+    if (voucher.business_id !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
+
     const rows = db
       .prepare(`
         SELECT r.id, r.ip_address as ipAddress, r.success, r.reason, r.redeemed_at as redeemedAt,
@@ -1457,13 +1678,18 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ redemptions: rows });
   });
 
-  app.get('/api/vouchers/export/csv', requireAuth, (req, res) => {
+  app.get('/api/vouchers/export/csv', requireAuth, requireRole(...FINANCE_ROLES, 'SUPPORT_STAFF'), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const status = typeof req.query.status === 'string' ? req.query.status : 'ALL';
     const sql =
       status === 'ALL'
-        ? 'SELECT v.*, p.name as package_name, p.price_tzs FROM vouchers v JOIN packages p ON p.id = v.package_id ORDER BY v.created_at DESC'
-        : 'SELECT v.*, p.name as package_name, p.price_tzs FROM vouchers v JOIN packages p ON p.id = v.package_id WHERE v.status = ? ORDER BY v.created_at DESC';
-    const rows = (status === 'ALL' ? db.prepare(sql).all() : db.prepare(sql).all(status)) as Array<Record<string, unknown>>;
+        ? 'SELECT v.*, p.name as package_name, p.price_tzs FROM vouchers v JOIN packages p ON p.id = v.package_id WHERE v.business_id = ? ORDER BY v.created_at DESC'
+        : 'SELECT v.*, p.name as package_name, p.price_tzs FROM vouchers v JOIN packages p ON p.id = v.package_id WHERE v.business_id = ? AND v.status = ? ORDER BY v.created_at DESC';
+    const rows = (status === 'ALL' ? db.prepare(sql).all(scope.businessId) : db.prepare(sql).all(scope.businessId, status)) as Array<
+      Record<string, unknown>
+    >;
 
     const lines = ['ID,Code,Masked,Package,Price_TZS,Status,Batch_ID,Created_At,Expires_At'];
     for (const r of rows) {
@@ -1492,14 +1718,17 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       );
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="netco-vouchers.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename="traxlink-vouchers.csv"');
     res.send(lines.join('\n'));
   });
 
   // =========================================================================
-  // SESSIONS & NETWORK ACCESS CONTROL
+  // SESSIONS & NETWORK ACCESS CONTROL (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/sessions', requireAuth, (req, res) => {
+  app.get('/api/sessions', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     expireStaleRecords(db);
     const status = typeof req.query.status === 'string' ? req.query.status : 'ALL';
     let sql = `
@@ -1515,9 +1744,9 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       JOIN devices d ON d.id = s.device_id
       LEFT JOIN customers c ON c.id = s.customer_id
       LEFT JOIN routers r ON r.id = s.router_id
-      WHERE 1=1
+      WHERE s.business_id = ?
     `;
-    const params: string[] = [];
+    const params: string[] = [scope.businessId];
     if (status !== 'ALL') {
       sql += ' AND s.status = ?';
       params.push(status);
@@ -1527,15 +1756,21 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ sessions });
   });
 
-  app.post('/api/sessions/:id/terminate', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR'), async (req: AuthedRequest, res) => {
+  app.post('/api/sessions/:id/terminate', requireAuth, requireRole(...NETWORK_ROLES), async (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
     if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (String(session.business_id) !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
 
     const nowIso = new Date().toISOString();
     db.prepare(`
       UPDATE sessions SET status = 'TERMINATED', ended_at = ?, end_reason = 'Terminated by administrator'
-      WHERE id = ? AND status = 'ACTIVE'
-    `).run(nowIso, req.params.id);
+      WHERE id = ? AND status = 'ACTIVE' AND business_id = ?
+    `).run(nowIso, req.params.id, scope.businessId);
 
     let routerResult: { removed: boolean; detail: string } | null = null;
     if (session.router_id && session.ip_address) {
@@ -1548,26 +1783,29 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       });
     }
 
-    emitEvent(io, 'session:ended', { sessionId: req.params.id, reason: 'Admin terminated' });
+    emitEvent(io, 'session:ended', { sessionId: req.params.id, reason: 'Admin terminated', businessId: scope.businessId });
     res.json({ ok: true, routerResult });
   });
 
-  app.post('/api/sessions/expire-sweep', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR'), (_req, res) => {
+  app.post('/api/sessions/expire-sweep', requireAuth, requireRole(...NETWORK_ROLES), (_req, res) => {
     const result = expireStaleRecords(db);
-    if (result.expiredSessions > 0) {
+    if (result.expiredSessions > 0 || result.expiredSubscriptions > 0) {
       emitEvent(io, 'session:ended', { expiredCount: result.expiredSessions });
     }
     res.json(result);
   });
 
   // =========================================================================
-  // PAYMENTS (ADMIN)
+  // PAYMENTS (TENANT WIFI REVENUE LEDGER — ISOLATED BY business_id)
   // =========================================================================
   app.get('/api/payments/providers', requireAuth, (_req, res) => {
     res.json({ providers: getProviderStatuses() });
   });
 
-  app.get('/api/payments', requireAuth, (req, res) => {
+  app.get('/api/payments', requireAuth, requireRole(...FINANCE_ROLES, 'SUPPORT_STAFF'), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const status = typeof req.query.status === 'string' ? req.query.status : 'ALL';
     const provider = typeof req.query.provider === 'string' ? req.query.provider : 'ALL';
     let sql = `
@@ -1582,9 +1820,9 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       JOIN packages pk ON pk.id = p.package_id
       LEFT JOIN vouchers v ON v.id = p.voucher_id
       LEFT JOIN customers c ON c.id = p.customer_id
-      WHERE 1=1
+      WHERE p.business_id = ?
     `;
-    const params: string[] = [];
+    const params: string[] = [scope.businessId];
     if (status !== 'ALL') {
       sql += ' AND p.status = ?';
       params.push(status);
@@ -1602,19 +1840,26 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ payments });
   });
 
-  app.post('/api/payments/:id/refund', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
+  app.post('/api/payments/:id/refund', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES, 'ACCOUNTANT'), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
     if (!payment) return res.status(404).json({ error: 'Payment not found' });
+    if (String(payment.business_id) !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
     if (payment.status !== 'COMPLETED') {
       return res.status(400).json({ error: 'Only completed payments can be marked refunded' });
     }
 
     const nowIso = new Date().toISOString();
     withTransaction(db, () => {
-      db.prepare("UPDATE payments SET status = 'REFUNDED', refunded_at = ?, updated_at = ? WHERE id = ?").run(
+      db.prepare("UPDATE payments SET status = 'REFUNDED', refunded_at = ?, updated_at = ? WHERE id = ? AND business_id = ?").run(
         nowIso,
         nowIso,
-        req.params.id
+        req.params.id,
+        scope.businessId
       );
       if (payment.voucher_id) {
         db.prepare(`
@@ -1622,6 +1867,11 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
           WHERE id = ? AND status != 'REVOKED'
         `).run(nowIso, nowIso, String(payment.voucher_id));
       }
+      db.prepare("UPDATE subscriptions SET status = 'SUSPENDED', revoked_at = ?, updated_at = ? WHERE payment_id = ?").run(
+        nowIso,
+        nowIso,
+        req.params.id
+      );
     });
 
     if (req.actor) {
@@ -1629,29 +1879,39 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         reference: payment.reference,
       });
     }
-    emitEvent(io, 'payment:updated', { reference: payment.reference, status: 'REFUNDED' });
+    emitEvent(io, 'payment:updated', { reference: payment.reference, status: 'REFUNDED', businessId: scope.businessId });
     res.json({ ok: true });
   });
 
   // =========================================================================
-  // MIKROTIK ROUTERS
+  // MIKROTIK ROUTERS (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/routers', requireAuth, (_req, res) => {
+  app.get('/api/routers', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const routers = db
       .prepare(`
-        SELECT id, name, host, api_port as apiPort, use_tls as useTls, username,
-               hotspot_server as hotspotServer, status, cpu_load as cpuLoad,
-               memory_used_bytes as memoryUsedBytes, memory_total_bytes as memoryTotalBytes,
-               uptime, router_os_version as routerOsVersion, board_name as boardName,
-               last_error as lastError, last_checked_at as lastCheckedAt, created_at as createdAt
-        FROM routers
-        ORDER BY created_at DESC
+        SELECT r.id, r.business_id as businessId, r.location_id as locationId, l.name as locationName,
+               r.name, r.host, r.api_port as apiPort, r.use_tls as useTls, r.username,
+               r.hotspot_server as hotspotServer, r.router_os_family as routerOsFamily,
+               r.wireguard_pubkey as wireguardPubkey, r.status, r.cpu_load as cpuLoad,
+               r.memory_used_bytes as memoryUsedBytes, r.memory_total_bytes as memoryTotalBytes,
+               r.uptime, r.router_os_version as routerOsVersion, r.board_name as boardName,
+               r.last_error as lastError, r.last_checked_at as lastCheckedAt, r.created_at as createdAt
+        FROM routers r
+        LEFT JOIN locations l ON l.id = r.location_id
+        WHERE r.business_id = ?
+        ORDER BY r.created_at DESC
       `)
-      .all();
+      .all(scope.businessId);
     res.json({ routers });
   });
 
-  app.post('/api/routers', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR'), (req: AuthedRequest, res) => {
+  app.post('/api/routers', requireAuth, requireRole(...NETWORK_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const schema = z.object({
       name: z.string().min(2).max(80),
       host: z.string().max(255).optional().default(''),
@@ -1660,6 +1920,9 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       username: z.string().max(80).optional().default(''),
       password: z.string().max(128).optional().default(''),
       hotspotServer: z.string().max(80).optional().default(''),
+      locationId: z.string().max(64).optional().nullable(),
+      routerOsFamily: z.enum(['ROUTEROS_V6', 'ROUTEROS_V7']).optional().default('ROUTEROS_V7'),
+      wireguardPubkey: z.string().max(128).optional().nullable(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -1672,20 +1935,22 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     }
 
     const dupByName = db
-      .prepare('SELECT id FROM routers WHERE LOWER(name) = LOWER(?)')
-      .get(parsed.data.name.trim());
+      .prepare('SELECT id FROM routers WHERE business_id = ? AND LOWER(name) = LOWER(?)')
+      .get(scope.businessId, parsed.data.name.trim());
     if (dupByName) {
-      return res.status(409).json({ error: 'A router with this name already exists' });
+      return res.status(409).json({ error: 'A router with this name already exists in your workspace' });
     }
     if (cleanHost) {
       const dupByHost = db
-        .prepare('SELECT id FROM routers WHERE host = ? AND api_port = ?')
-        .get(cleanHost, parsed.data.apiPort);
+        .prepare('SELECT id FROM routers WHERE business_id = ? AND host = ? AND api_port = ?')
+        .get(scope.businessId, cleanHost, parsed.data.apiPort);
       if (dupByHost) {
         return res.status(409).json({ error: 'A router with this host and port already exists' });
       }
     } else {
-      const unconfigured = db.prepare("SELECT id FROM routers WHERE host = '' AND api_port = ?").get(parsed.data.apiPort);
+      const unconfigured = db
+        .prepare("SELECT id FROM routers WHERE business_id = ? AND host = '' AND api_port = ?")
+        .get(scope.businessId, parsed.data.apiPort);
       if (unconfigured) {
         return res.status(409).json({ error: 'An unconfigured router profile already exists. Edit it to add hardware details.' });
       }
@@ -1694,13 +1959,17 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     const id = generateId('rtr');
     const nowIso = new Date().toISOString();
     const cleanPass = parsed.data.password.trim();
+    const radiusSecret = crypto.randomBytes(12).toString('hex');
+
     db.prepare(`
       INSERT INTO routers (
-        id, name, host, api_port, use_tls, username, password_encrypted,
-        hotspot_server, status, last_error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NOT_CONNECTED', ?, ?, ?)
+        id, business_id, location_id, name, host, api_port, use_tls, username, password_encrypted,
+        hotspot_server, router_os_family, wireguard_pubkey, radius_secret, status, last_error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NOT_CONNECTED', ?, ?, ?)
     `).run(
       id,
+      scope.businessId,
+      parsed.data.locationId?.trim() || null,
       parsed.data.name.trim(),
       cleanHost,
       parsed.data.apiPort,
@@ -1708,6 +1977,9 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       parsed.data.username.trim(),
       cleanPass ? encryptSecret(cleanPass) : '',
       parsed.data.hotspotServer.trim(),
+      parsed.data.routerOsFamily,
+      parsed.data.wireguardPubkey?.trim() || null,
+      radiusSecret,
       cleanHost ? null : 'Awaiting MikroTik hardware credentials',
       nowIso,
       nowIso
@@ -1723,17 +1995,25 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     const router = db
       .prepare(`
-        SELECT id, name, host, api_port as apiPort, use_tls as useTls, username,
-               hotspot_server as hotspotServer, status, last_error as lastError, created_at as createdAt
+        SELECT id, business_id as businessId, location_id as locationId, name, host, api_port as apiPort, use_tls as useTls, username,
+               hotspot_server as hotspotServer, router_os_family as routerOsFamily, status, last_error as lastError, created_at as createdAt
         FROM routers WHERE id = ?
       `)
       .get(id);
     res.status(201).json({ router });
   });
 
-  app.patch('/api/routers/:id', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR'), (req: AuthedRequest, res) => {
-    const existing = db.prepare('SELECT id FROM routers WHERE id = ?').get(req.params.id);
+  app.patch('/api/routers/:id', requireAuth, requireRole(...NETWORK_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const existing = db.prepare('SELECT id, business_id FROM routers WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string }
+      | undefined;
     if (!existing) return res.status(404).json({ error: 'Router not found' });
+    if (existing.business_id !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
 
     const schema = z.object({
       name: z.string().min(2).max(80).optional(),
@@ -1743,6 +2023,8 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       username: z.string().max(80).optional(),
       password: z.string().max(128).optional(),
       hotspotServer: z.string().max(80).optional(),
+      locationId: z.string().max(64).optional().nullable(),
+      routerOsFamily: z.enum(['ROUTEROS_V6', 'ROUTEROS_V7']).optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -1763,8 +2045,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
           username = COALESCE(?, username),
           password_encrypted = COALESCE(?, password_encrypted),
           hotspot_server = COALESCE(?, hotspot_server),
+          location_id = CASE WHEN ? IS NOT NULL THEN ? ELSE location_id END,
+          router_os_family = COALESCE(?, router_os_family),
           updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND business_id = ?
     `).run(
       parsed.data.name?.trim() ?? null,
       parsed.data.host !== undefined ? parsed.data.host.trim() : null,
@@ -1775,8 +2059,12 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         ? encryptSecret(parsed.data.password.trim())
         : null,
       parsed.data.hotspotServer !== undefined ? parsed.data.hotspotServer.trim() : null,
+      parsed.data.locationId !== undefined ? 'set' : null,
+      parsed.data.locationId?.trim() || null,
+      parsed.data.routerOsFamily ?? null,
       nowIso,
-      req.params.id
+      req.params.id,
+      scope.businessId
     );
 
     if (req.actor) {
@@ -1785,19 +2073,27 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     const updated = db
       .prepare(`
-        SELECT id, name, host, api_port as apiPort, use_tls as useTls, username,
-               hotspot_server as hotspotServer, status, last_error as lastError
+        SELECT id, business_id as businessId, location_id as locationId, name, host, api_port as apiPort, use_tls as useTls, username,
+               hotspot_server as hotspotServer, router_os_family as routerOsFamily, status, last_error as lastError
         FROM routers WHERE id = ?
       `)
       .get(req.params.id);
     res.json({ router: updated });
   });
 
-  app.delete('/api/routers/:id', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
-    const existing = db.prepare('SELECT id, name FROM routers WHERE id = ?').get(req.params.id) as { id: string; name: string } | undefined;
-    if (!existing) return res.status(404).json({ error: 'Router not found' });
+  app.delete('/api/routers/:id', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
 
-    db.prepare('DELETE FROM routers WHERE id = ?').run(req.params.id);
+    const existing = db.prepare('SELECT id, business_id, name FROM routers WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string; name: string }
+      | undefined;
+    if (!existing) return res.status(404).json({ error: 'Router not found' });
+    if (existing.business_id !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
+
+    db.prepare('DELETE FROM routers WHERE id = ? AND business_id = ?').run(req.params.id, scope.businessId);
     if (req.actor) {
       recordAuditLog(db, req.actor, 'ROUTER_REMOVED', 'Router', req.params.id, getClientIp(req), {
         name: existing.name,
@@ -1806,13 +2102,24 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ ok: true });
   });
 
-  app.post('/api/routers/:id/test', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR'), async (req: AuthedRequest, res) => {
+  app.post('/api/routers/:id/test', requireAuth, requireRole(...NETWORK_ROLES), async (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const routerRow = db.prepare('SELECT id, business_id FROM routers WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string }
+      | undefined;
+    if (!routerRow) return res.status(404).json({ error: 'Router not found' });
+    if (routerRow.business_id !== scope.businessId) {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
+
     try {
       const telemetry = await syncRouterTelemetry(db, req.params.id);
       const updated = db
         .prepare(`
           SELECT id, name, host, api_port as apiPort, use_tls as useTls, username,
-                 hotspot_server as hotspotServer, status, cpu_load as cpuLoad,
+                 hotspot_server as hotspotServer, router_os_family as routerOsFamily, status, cpu_load as cpuLoad,
                  memory_used_bytes as memoryUsedBytes, memory_total_bytes as memoryTotalBytes,
                  uptime, router_os_version as routerOsVersion, board_name as boardName,
                  last_error as lastError, last_checked_at as lastCheckedAt
@@ -1827,14 +2134,23 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         });
       }
 
-      emitEvent(io, 'router:status', { routerId: req.params.id, connected: telemetry.connected });
+      emitEvent(io, 'router:status', { routerId: req.params.id, connected: telemetry.connected, businessId: scope.businessId });
       res.json({ router: updated, telemetry });
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : 'Router not found' });
     }
   });
 
-  app.get('/api/routers/:id/interfaces', requireAuth, (req, res) => {
+  app.get('/api/routers/:id/interfaces', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const routerRow = db.prepare('SELECT id, business_id FROM routers WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string }
+      | undefined;
+    if (!routerRow) return res.status(404).json({ error: 'Router not found' });
+    if (routerRow.business_id !== scope.businessId) return res.status(403).json({ error: 'Cross-tenant access denied' });
+
     const interfaces = db
       .prepare(`
         SELECT id, name, type, running, disabled, rx_bytes as rxBytes, tx_bytes as txBytes, updated_at as updatedAt
@@ -1846,14 +2162,25 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ interfaces });
   });
 
-  app.post('/api/routers/:id/sync-profiles', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR'), async (req: AuthedRequest, res) => {
-    const packages = db.prepare('SELECT * FROM packages WHERE is_active = 1').all() as Array<Record<string, unknown>>;
+  app.post('/api/routers/:id/sync-profiles', requireAuth, requireRole(...NETWORK_ROLES), async (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const routerRow = db.prepare('SELECT id, business_id FROM routers WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string }
+      | undefined;
+    if (!routerRow) return res.status(404).json({ error: 'Router not found' });
+    if (routerRow.business_id !== scope.businessId) return res.status(403).json({ error: 'Cross-tenant access denied' });
+
+    const packages = db
+      .prepare('SELECT * FROM packages WHERE is_active = 1 AND business_id = ?')
+      .all(scope.businessId) as Array<Record<string, unknown>>;
     const results = [];
     for (const pkg of packages) {
       const r = await pushHotspotProfileToRouter(
         db,
         req.params.id,
-        `netco-${String(pkg.id)}`,
+        `trax-${String(pkg.id)}`,
         Number(pkg.download_kbps),
         Number(pkg.upload_kbps)
       );
@@ -1868,9 +2195,12 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
   });
 
   // =========================================================================
-  // REPORTS & ANALYTICS
+  // REPORTS & ANALYTICS (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/reports/overview', requireAuth, (req, res) => {
+  app.get('/api/reports/overview', requireAuth, requireRole(...FINANCE_ROLES, 'NETWORK_OPERATOR'), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const from = typeof req.query.from === 'string' && req.query.from ? req.query.from : '1970-01-01T00:00:00.000Z';
     const to = typeof req.query.to === 'string' && req.query.to ? req.query.to : '2999-12-31T23:59:59.999Z';
 
@@ -1878,22 +2208,22 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       .prepare(`
         SELECT provider, COUNT(*) as txCount, COALESCE(SUM(amount_tzs), 0) as totalTzs
         FROM payments
-        WHERE status = 'COMPLETED' AND is_test = 0 AND verified_at >= ? AND verified_at <= ?
+        WHERE business_id = ? AND status = 'COMPLETED' AND is_test = 0 AND verified_at >= ? AND verified_at <= ?
         GROUP BY provider
       `)
-      .all(from, to);
+      .all(scope.businessId, from, to);
 
     const testStatsRow = db
       .prepare(`
         SELECT COUNT(*) as testTokensIssued, COALESCE(SUM(amount_tzs), 0) as testNominalTzs
         FROM payments
-        WHERE status = 'COMPLETED' AND is_test = 1 AND verified_at >= ? AND verified_at <= ?
+        WHERE business_id = ? AND status = 'COMPLETED' AND is_test = 1 AND verified_at >= ? AND verified_at <= ?
       `)
-      .get(from, to) as { testTokensIssued: number; testNominalTzs: number };
+      .get(scope.businessId, from, to) as { testTokensIssued: number; testNominalTzs: number };
 
     const testVouchersRow = db
-      .prepare('SELECT COUNT(*) as testVouchersCount FROM vouchers WHERE is_test = 1 AND created_at >= ? AND created_at <= ?')
-      .get(from, to) as { testVouchersCount: number };
+      .prepare('SELECT COUNT(*) as testVouchersCount FROM vouchers WHERE business_id = ? AND is_test = 1 AND created_at >= ? AND created_at <= ?')
+      .get(scope.businessId, from, to) as { testVouchersCount: number };
 
     const packageSales = db
       .prepare(`
@@ -1902,10 +2232,11 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
                SUM(CASE WHEN v.status IN ('ACTIVE','EXPIRED') THEN 1 ELSE 0 END) as vouchersRedeemed
         FROM packages pk
         LEFT JOIN vouchers v ON v.package_id = pk.id AND v.created_at >= ? AND v.created_at <= ?
+        WHERE pk.business_id = ?
         GROUP BY pk.id
         ORDER BY vouchersIssued DESC
       `)
-      .all(from, to);
+      .all(from, to, scope.businessId);
 
     const sessionStats = db
       .prepare(`
@@ -1913,10 +2244,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
                COALESCE(SUM(bytes_in), 0) as totalRxBytes,
                COALESCE(SUM(bytes_out), 0) as totalTxBytes
         FROM sessions
-        WHERE started_at >= ? AND started_at <= ?
+        WHERE business_id = ? AND started_at >= ? AND started_at <= ?
         GROUP BY status
       `)
-      .all(from, to);
+      .all(scope.businessId, from, to);
 
     res.json({
       revenueByProvider,
@@ -1930,7 +2261,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     });
   });
 
-  app.get('/api/reports/export/csv', requireAuth, (req, res) => {
+  app.get('/api/reports/export/csv', requireAuth, requireRole(...FINANCE_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const type = typeof req.query.type === 'string' ? req.query.type : 'payments';
     if (type === 'sessions') {
       const rows = db
@@ -1941,9 +2275,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
           JOIN vouchers v ON v.id = s.voucher_id
           JOIN packages p ON p.id = v.package_id
           JOIN devices d ON d.id = s.device_id
+          WHERE s.business_id = ?
           ORDER BY s.started_at DESC
         `)
-        .all() as Array<Record<string, unknown>>;
+        .all(scope.businessId) as Array<Record<string, unknown>>;
       const lines = ['Session_ID,Voucher,Package,Device,IP,Status,Bytes_In,Bytes_Out,Started_At,Expires_At,Ended_At'];
       for (const r of rows) {
         lines.push(
@@ -1953,7 +2288,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
         );
       }
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', 'attachment; filename="netco-sessions-report.csv"');
+      res.setHeader('Content-Disposition', 'attachment; filename="traxlink-sessions-report.csv"');
       return res.send(lines.join('\n'));
     }
 
@@ -1963,9 +2298,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
                p.status, p.is_test, p.payment_mode, pk.name as package_name, p.verified_at, p.created_at
         FROM payments p
         JOIN packages pk ON pk.id = p.package_id
+        WHERE p.business_id = ?
         ORDER BY p.created_at DESC
       `)
-      .all() as Array<Record<string, unknown>>;
+      .all(scope.businessId) as Array<Record<string, unknown>>;
     const lines = ['Reference,Receipt,Provider,Phone,Amount_TZS,Status,Mode,Package,Verified_At,Created_At'];
     for (const r of rows) {
       const modeLabel = r.is_test ? 'TEST_STANDALONE' : 'LIVE_VERIFIED';
@@ -1976,39 +2312,52 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       );
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="netco-payments-report.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename="traxlink-payments-report.csv"');
     res.send(lines.join('\n'));
   });
 
   // =========================================================================
-  // NOTIFICATIONS
+  // NOTIFICATIONS (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/notifications', requireAuth, (_req, res) => {
+  app.get('/api/notifications', requireAuth, requireRole(...ALL_BUSINESS_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const notifications = db
       .prepare(`
         SELECT id, type, severity, title, message, metadata, is_read as isRead, created_at as createdAt
         FROM notifications
+        WHERE business_id = ?
         ORDER BY created_at DESC
         LIMIT 100
       `)
-      .all();
+      .all(scope.businessId);
     res.json({ notifications });
   });
 
-  app.post('/api/notifications/:id/read', requireAuth, (req, res) => {
-    db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ?').run(req.params.id);
+  app.post('/api/notifications/:id/read', requireAuth, (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND business_id = ?').run(req.params.id, scope.businessId);
     res.json({ ok: true });
   });
 
-  app.post('/api/notifications/read-all', requireAuth, (_req, res) => {
-    db.prepare('UPDATE notifications SET is_read = 1 WHERE is_read = 0').run();
+  app.post('/api/notifications/read-all', requireAuth, (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    db.prepare('UPDATE notifications SET is_read = 1 WHERE is_read = 0 AND business_id = ?').run(scope.businessId);
     res.json({ ok: true });
   });
 
   // =========================================================================
-  // STAFF, RBAC & AUDIT LOGS
+  // STAFF, RBAC & AUDIT LOGS (ISOLATED BY business_id)
   // =========================================================================
-  app.get('/api/staff', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (_req, res) => {
+  app.get('/api/staff', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const staff = db
       .prepare(`
         SELECT u.id, u.email, u.full_name as fullName, u.role, u.is_active as isActive,
@@ -2016,18 +2365,30 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
                s.staff_code as staffCode, s.department, s.phone, s.is_suspended as isSuspended
         FROM admin_users u
         LEFT JOIN staff s ON s.admin_user_id = u.id
+        WHERE u.business_id = ?
         ORDER BY u.created_at DESC
       `)
-      .all();
+      .all(scope.businessId);
     res.json({ staff });
   });
 
-  app.post('/api/staff', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
+  app.post('/api/staff', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const schema = z.object({
       email: z.string().email().max(254),
       fullName: z.string().min(2).max(100),
       password: z.string().min(8).max(128),
-      role: z.enum(['SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR', 'CASHIER']),
+      role: z.enum([
+        'SUPER_ADMIN',
+        'BUSINESS_OWNER',
+        'ADMIN',
+        'ACCOUNTANT',
+        'NETWORK_OPERATOR',
+        'SUPPORT_STAFF',
+        'CASHIER',
+      ]),
       department: z.string().min(2).max(80).default('Operations'),
       phone: z.string().max(24).optional().nullable(),
     });
@@ -2052,15 +2413,25 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
 
     withTransaction(db, () => {
       db.prepare(`
-        INSERT INTO admin_users (id, email, full_name, password_hash, role, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-      `).run(id, emailLower, parsed.data.fullName.trim(), hashPassword(parsed.data.password), parsed.data.role, nowIso, nowIso);
+        INSERT INTO admin_users (id, business_id, email, full_name, password_hash, role, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        id,
+        scope.businessId,
+        emailLower,
+        parsed.data.fullName.trim(),
+        hashPassword(parsed.data.password),
+        parsed.data.role,
+        nowIso,
+        nowIso
+      );
 
       db.prepare(`
-        INSERT INTO staff (id, admin_user_id, staff_code, department, phone, role, is_suspended)
-        VALUES (?, ?, ?, ?, ?, ?, 0)
+        INSERT INTO staff (id, business_id, admin_user_id, staff_code, department, phone, role, is_suspended)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
       `).run(
         generateId('stf'),
+        scope.businessId,
         id,
         staffCode,
         parsed.data.department.trim(),
@@ -2079,6 +2450,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.status(201).json({
       staff: {
         id,
+        businessId: scope.businessId,
         email: emailLower,
         fullName: parsed.data.fullName.trim(),
         role: parsed.data.role,
@@ -2088,12 +2460,20 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     });
   });
 
-  app.patch('/api/staff/:id', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
+  app.patch('/api/staff/:id', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const target = db.prepare('SELECT * FROM admin_users WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
     if (!target) return res.status(404).json({ error: 'Staff user not found' });
+    if (String(target.business_id) !== scope.businessId && req.actor?.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
 
     const schema = z.object({
-      role: z.enum(['SUPER_ADMIN', 'ADMIN', 'NETWORK_OPERATOR', 'CASHIER']).optional(),
+      role: z
+        .enum(['SUPER_ADMIN', 'BUSINESS_OWNER', 'ADMIN', 'ACCOUNTANT', 'NETWORK_OPERATOR', 'SUPPORT_STAFF', 'CASHIER'])
+        .optional(),
       isSuspended: z.boolean().optional(),
       department: z.string().min(2).max(80).optional(),
     });
@@ -2102,7 +2482,7 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
       return res.status(400).json({ error: 'Invalid staff update' });
     }
 
-    if (target.role === 'SUPER_ADMIN' && req.actor?.role !== 'SUPER_ADMIN') {
+    if ((target.role === 'SUPER_ADMIN' || parsed.data.role === 'SUPER_ADMIN') && req.actor?.role !== 'SUPER_ADMIN') {
       return res.status(403).json({ error: 'Only Super Admin can modify a Super Admin account' });
     }
     if (req.params.id === req.actor?.id && parsed.data.isSuspended) {
@@ -2156,15 +2536,23 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ ok: true });
   });
 
-  app.post('/api/staff/:id/reset-password', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
+  app.post('/api/staff/:id/reset-password', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const schema = z.object({ newPassword: z.string().min(8).max(128) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'New password must be at least 8 characters' });
     }
 
-    const target = db.prepare('SELECT id, role FROM admin_users WHERE id = ?').get(req.params.id) as { id: string; role: StaffRole } | undefined;
+    const target = db.prepare('SELECT id, business_id, role FROM admin_users WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string; role: StaffRole }
+      | undefined;
     if (!target) return res.status(404).json({ error: 'Staff user not found' });
+    if (target.business_id !== scope.businessId && req.actor?.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
     if (target.role === 'SUPER_ADMIN' && req.actor?.role !== 'SUPER_ADMIN') {
       return res.status(403).json({ error: 'Only Super Admin can reset a Super Admin password' });
     }
@@ -2186,12 +2574,18 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ ok: true });
   });
 
-  app.post('/api/staff/:id/recovery-code', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
-    const target = db.prepare('SELECT id, email, role, is_active FROM admin_users WHERE id = ?').get(req.params.id) as
-      | { id: string; email: string; role: StaffRole; is_active: number }
+  app.post('/api/staff/:id/recovery-code', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const target = db.prepare('SELECT id, business_id, email, role, is_active FROM admin_users WHERE id = ?').get(req.params.id) as
+      | { id: string; business_id: string; email: string; role: StaffRole; is_active: number }
       | undefined;
     if (!target || !target.is_active) {
       return res.status(404).json({ error: 'Active staff user not found' });
+    }
+    if (target.business_id !== scope.businessId && req.actor?.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
     }
     if (target.role === 'SUPER_ADMIN' && req.actor?.role !== 'SUPER_ADMIN') {
       return res.status(403).json({ error: 'Only Super Admin can issue a recovery code for a Super Admin' });
@@ -2222,7 +2616,10 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ code: formattedCode, expiresAt, email: target.email });
   });
 
-  app.get('/api/staff/sessions', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (_req, res) => {
+  app.get('/api/staff/sessions', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const sessions = db
       .prepare(`
         SELECT ss.id, ss.ip_address as ipAddress, ss.user_agent as userAgent,
@@ -2230,14 +2627,26 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
                u.email, u.full_name as fullName, u.role
         FROM staff_sessions ss
         JOIN admin_users u ON u.id = ss.admin_user_id
+        WHERE u.business_id = ?
         ORDER BY ss.created_at DESC
         LIMIT 100
       `)
-      .all();
+      .all(scope.businessId);
     res.json({ sessions });
   });
 
-  app.post('/api/staff/sessions/:id/revoke', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req: AuthedRequest, res) => {
+  app.post('/api/staff/sessions/:id/revoke', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
+    const target = db
+      .prepare('SELECT ss.id, u.business_id FROM staff_sessions ss JOIN admin_users u ON u.id = ss.admin_user_id WHERE ss.id = ?')
+      .get(req.params.id) as { id: string; business_id: string } | undefined;
+    if (!target) return res.status(404).json({ error: 'Staff session not found' });
+    if (target.business_id !== scope.businessId && req.actor?.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Cross-tenant access denied' });
+    }
+
     db.prepare('UPDATE staff_sessions SET revoked_at = ? WHERE id = ?').run(
       new Date().toISOString(),
       req.params.id
@@ -2248,12 +2657,15 @@ export function createApp(db: NetcoDb, io?: SocketIOServer) {
     res.json({ ok: true });
   });
 
-  app.get('/api/audit-logs', requireAuth, requireRole('SUPER_ADMIN', 'ADMIN'), (req, res) => {
+  app.get('/api/audit-logs', requireAuth, requireRole(...BUSINESS_MANAGEMENT_ROLES), (req: AuthedRequest, res) => {
+    const scope = resolveTenantScope(db, req);
+    if ('error' in scope) return res.status(scope.status).json({ error: scope.error });
+
     const action = typeof req.query.action === 'string' ? req.query.action.trim() : '';
     const sql = action
-      ? 'SELECT * FROM audit_logs WHERE action LIKE ? ORDER BY created_at DESC LIMIT 200'
-      : 'SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200';
-    const logs = action ? db.prepare(sql).all(`%${action}%`) : db.prepare(sql).all();
+      ? 'SELECT * FROM audit_logs WHERE business_id = ? AND action LIKE ? ORDER BY created_at DESC LIMIT 200'
+      : 'SELECT * FROM audit_logs WHERE business_id = ? ORDER BY created_at DESC LIMIT 200';
+    const logs = action ? db.prepare(sql).all(scope.businessId, `%${action}%`) : db.prepare(sql).all(scope.businessId);
     res.json({ logs });
   });
 

@@ -2,11 +2,20 @@ import React, { useEffect, useState } from 'react';
 import { Check, Copy, Eye, EyeOff, Key, KeyRound, Plus, Shield, X } from 'lucide-react';
 import { apiRequest } from '../lib/api.ts';
 
+type StaffRoleValue =
+  | 'SUPER_ADMIN'
+  | 'BUSINESS_OWNER'
+  | 'ADMIN'
+  | 'ACCOUNTANT'
+  | 'NETWORK_OPERATOR'
+  | 'SUPPORT_STAFF'
+  | 'CASHIER';
+
 interface StaffMember {
   id: string;
   email: string;
   fullName: string;
-  role: 'SUPER_ADMIN' | 'ADMIN' | 'NETWORK_OPERATOR' | 'CASHIER';
+  role: StaffRoleValue;
   isActive: number;
   staffCode: string | null;
   department: string | null;
@@ -53,7 +62,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState<'ADMIN' | 'NETWORK_OPERATOR' | 'CASHIER' | 'SUPER_ADMIN'>('CASHIER');
+  const [role, setRole] = useState<StaffRoleValue>('CASHIER');
   const [department, setDepartment] = useState('Operations');
   const [saving, setSaving] = useState(false);
 
@@ -194,7 +203,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
           </button>
         </div>
 
-        {(currentRole === 'SUPER_ADMIN' || currentRole === 'ADMIN') && (
+        {(currentRole === 'SUPER_ADMIN' || currentRole === 'BUSINESS_OWNER' || currentRole === 'ADMIN') && (
           <button
             type="button"
             onClick={() => setCreateOpen(true)}
@@ -213,14 +222,14 @@ export function StaffAuditView({ token, currentRole }: Props) {
       )}
 
       {issuedRecovery && (
-        <div className="p-3.5 rounded-xl border border-[#16B8FF]/35 bg-[#16B8FF]/10 text-xs flex flex-wrap items-center justify-between gap-3">
+        <div className="p-3.5 rounded-xl border border-[#FFD400]/35 bg-[#FFD400]/10 text-xs flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="font-semibold text-slate-900 dark:text-white">
               One-Time Recovery Code for {issuedRecovery.email}
             </p>
             <p className="text-slate-600 dark:text-[#8793A5] mt-0.5">
               Code:{' '}
-              <span className="font-mono font-bold text-[#0284C7] dark:text-[#16B8FF] tracking-wider">
+              <span className="font-mono font-bold text-[#9A7B00] dark:text-[#FFD400] tracking-wider">
                 {issuedRecovery.code}
               </span>{' '}
               · Expires {new Date(issuedRecovery.expiresAt).toLocaleTimeString()}
@@ -254,7 +263,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
       {loading ? (
         <div className="p-8 text-center text-xs text-slate-500">Loading administration records...</div>
       ) : subTab === 'staff' ? (
-        <div className="bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-x-auto">
+        <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
               <tr>
@@ -276,7 +285,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
                   </td>
                   <td className="py-3 px-4 font-mono">
                     <span className="inline-flex items-center gap-1">
-                      <Shield className="w-3.5 h-3.5 text-[#16B8FF]" />
+                      <Shield className="w-3.5 h-3.5 text-[#9A7B00] dark:text-[#FFD400]" />
                       {m.role}
                     </span>
                   </td>
@@ -322,7 +331,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
           </table>
         </div>
       ) : subTab === 'sessions' ? (
-        <div className="bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-x-auto">
+        <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
               <tr>
@@ -360,7 +369,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
           </table>
         </div>
       ) : (
-        <div className="bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-x-auto">
+        <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
               <tr>
@@ -392,7 +401,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
 
       {createOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">Create Staff Account</h3>
               <button
@@ -412,7 +421,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
                   required
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 />
               </div>
               <div>
@@ -422,7 +431,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 />
               </div>
               <div>
@@ -434,7 +443,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
                     minLength={8}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    className="w-full pl-3 pr-9 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                    className="w-full pl-3 pr-9 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                   />
                   <button
                     type="button"
@@ -451,13 +460,16 @@ export function StaffAuditView({ token, currentRole }: Props) {
                   <label className="block font-medium mb-1">Role</label>
                   <select
                     value={role}
-                    onChange={(e) => setRole(e.target.value as typeof role)}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                    onChange={(e) => setRole(e.target.value as StaffRoleValue)}
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                   >
                     <option value="CASHIER">Cashier</option>
+                    <option value="SUPPORT_STAFF">Support Staff</option>
                     <option value="NETWORK_OPERATOR">Network Operator</option>
-                    <option value="ADMIN">Administrator</option>
-                    {currentRole === 'SUPER_ADMIN' && <option value="SUPER_ADMIN">Super Admin</option>}
+                    <option value="ACCOUNTANT">Accountant</option>
+                    <option value="ADMIN">Business Administrator</option>
+                    <option value="BUSINESS_OWNER">Business Owner</option>
+                    {currentRole === 'SUPER_ADMIN' && <option value="SUPER_ADMIN">TRAX Super Admin</option>}
                   </select>
                 </div>
                 <div>
@@ -467,7 +479,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
                     required
                     value={department}
                     onChange={(e) => setDepartment(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                   />
                 </div>
               </div>
@@ -494,7 +506,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
 
       {resetTarget && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-sm w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+          <div className="max-w-sm w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
             <h3 className="text-base font-semibold">Reset Password — {resetTarget.fullName}</h3>
             <form onSubmit={handleResetPassword} className="space-y-3 text-xs">
               <div className="relative">
@@ -505,7 +517,7 @@ export function StaffAuditView({ token, currentRole }: Props) {
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   placeholder="New password (min 8 chars)"
-                  className="w-full pl-3 pr-9 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full pl-3 pr-9 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 />
                 <button
                   type="button"

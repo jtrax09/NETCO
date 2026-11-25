@@ -663,4 +663,279 @@ describe('NETCO Network Management System — End-to-End Backend Suite', () => {
     expect(devVouchers).toHaveLength(2);
     expect(devVouchers[0].isTest).toBe(true);
   });
+
+  it('registers independent business workspaces and strictly isolates cross-tenant access', async () => {
+    const bizA = await api(srv.baseUrl, '/api/auth/register-business', {
+      method: 'POST',
+      body: {
+        businessName: 'Kilimanjaro Fiber Ltd',
+        ownerName: 'Amina Hassan',
+        ownerEmail: 'amina@kilifiber.co.tz',
+        password: 'KiliPassword#2026',
+        phone: '+255754111222',
+        country: 'Tanzania',
+        region: 'Arusha',
+        planCode: 'STARTER',
+      },
+    });
+    expect(bizA.status).toBe(201);
+    const tokenA = String(bizA.json.token);
+    const idA = String((bizA.json.business as Record<string, unknown>).id);
+
+    const bizB = await api(srv.baseUrl, '/api/auth/register-business', {
+      method: 'POST',
+      body: {
+        businessName: 'Zanzibar Link Co',
+        ownerName: 'Juma Ali',
+        ownerEmail: 'juma@znzlink.co.tz',
+        password: 'ZnzPassword#2026',
+        phone: '+255777333444',
+        country: 'Tanzania',
+        region: 'Zanzibar',
+        planCode: 'STARTER',
+      },
+    });
+    expect(bizB.status).toBe(201);
+    const tokenB = String(bizB.json.token);
+    const idB = String((bizB.json.business as Record<string, unknown>).id);
+    expect(idA).not.toBe(idB);
+
+    // Business A creates a package and location
+    const pkgA = await api(srv.baseUrl, '/api/packages', {
+      method: 'POST',
+      token: tokenA,
+      body: {
+        name: 'Arusha Daily 5Mbps',
+        category: 'DAILY',
+        packageType: 'TIME_BASED',
+        priceTzs: 2500,
+        durationMinutes: 1440,
+        downloadKbps: 5000,
+        uploadKbps: 2500,
+      },
+    });
+    expect(pkgA.status).toBe(201);
+    const pkgAId = String((pkgA.json.package as Record<string, unknown>).id);
+
+    // Business B cannot see Business A's package in its list
+    const listB = await api(srv.baseUrl, '/api/packages', { token: tokenB });
+    expect(listB.status).toBe(200);
+    expect((listB.json.packages as Array<Record<string, unknown>>).some((p) => p.id === pkgAId)).toBe(false);
+
+    // Business B cannot patch or delete Business A's package
+    const patchCross = await api(srv.baseUrl, `/api/packages/${pkgAId}`, {
+      method: 'PATCH',
+      token: tokenB,
+      body: { priceTzs: 100 },
+    });
+    expect(patchCross.status).toBe(403);
+
+    // Business B attempting to spoof x-tenant-id header for Business A is blocked 403 and audited
+    const spoofRes = await api(srv.baseUrl, '/api/packages', {
+      token: tokenB,
+      headers: { 'x-tenant-id': idA },
+    });
+    expect(spoofRes.status).toBe(403);
+
+    const blockedAudit = db
+      .prepare("SELECT COUNT(*) as c FROM audit_logs WHERE action = 'CROSS_TENANT_ACCESS_BLOCKED'")
+      .get() as { c: number };
+    expect(blockedAudit.c).toBeGreaterThanOrEqual(1);
+  });
+
+  it('provisions RADIUS subscriptions on verified payment, enforces expiry, and queues offline router retries', async () => {
+    process.env.RADIUS_SHARED_SECRET = 'radius_test_secret_2026';
+
+    // Switch to MIKROTIK_MODE and register an unreachable router so retry queue runs cleanly without crashing payment
+    await api(srv.baseUrl, '/api/system/mode', {
+      method: 'PATCH',
+      token: adminToken,
+      body: { operatingMode: 'MIKROTIK_MODE' },
+    });
+    const rtr = await api(srv.baseUrl, '/api/routers', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        name: 'Offline Edge RB750',
+        host: '198.51.100.42',
+        apiPort: 8728,
+        username: 'apiuser',
+        password: 'apipassword',
+        routerOsFamily: 'ROUTEROS_V7',
+      },
+    });
+    expect(rtr.status).toBe(201);
+
+    const pkgRes = await api(srv.baseUrl, '/api/packages', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        name: 'RADIUS Gold Daily',
+        category: 'DAILY',
+        packageType: 'HYBRID',
+        priceTzs: 3000,
+        durationMinutes: 1440,
+        downloadKbps: 12000,
+        uploadKbps: 6000,
+        dataLimitMb: 5120,
+      },
+    });
+    expect(pkgRes.status).toBe(201);
+    const packageId = String((pkgRes.json.package as Record<string, unknown>).id);
+
+    // Initiate M-Pesa payment
+    const initRes = await api(srv.baseUrl, '/api/portal/payments/initiate', {
+      method: 'POST',
+      body: {
+        packageId,
+        provider: 'MPESA',
+        phoneNumber: '0754987654',
+      },
+    });
+    expect(initRes.status).toBe(201);
+    const reference = String((initRes.json.payment as Record<string, unknown>).reference);
+
+    // Failed webhook must NOT provision active subscription
+    const failPayload = JSON.stringify({
+      externalEventId: 'evt-fail-1',
+      reference,
+      externalTxId: 'MPESA-FAIL-1',
+      status: 'FAILED',
+      amountTzs: 3000,
+    });
+    const failSig = crypto.createHmac('sha256', process.env.MPESA_WEBHOOK_SECRET!).update(failPayload).digest('hex');
+    const failHook = await fetch(`${srv.baseUrl}/api/payments/webhook/MPESA`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webhook-Signature': `sha256=${failSig}` },
+      body: failPayload,
+    });
+    expect(failHook.status).toBe(200);
+    expect((db.prepare('SELECT COUNT(*) as c FROM subscriptions').get() as { c: number }).c).toBe(0);
+
+    // Create a fresh payment and confirm via valid COMPLETED webhook -> creates subscription + offline router retry job
+    const init2 = await api(srv.baseUrl, '/api/portal/payments/initiate', {
+      method: 'POST',
+      body: {
+        packageId,
+        provider: 'MPESA',
+        phoneNumber: '0754987654',
+      },
+    });
+    const ref2 = String((init2.json.payment as Record<string, unknown>).reference);
+    const okPayload = JSON.stringify({
+      externalEventId: 'evt-ok-2',
+      reference: ref2,
+      externalTxId: 'MPESA-OK-2',
+      status: 'COMPLETED',
+      amountTzs: 3000,
+    });
+    const okSig = crypto.createHmac('sha256', process.env.MPESA_WEBHOOK_SECRET!).update(okPayload).digest('hex');
+    const okHook = await fetch(`${srv.baseUrl}/api/payments/webhook/MPESA`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webhook-Signature': `sha256=${okSig}` },
+      body: okPayload,
+    });
+    expect(okHook.status).toBe(200);
+    const okJson = (await okHook.json()) as { outcome: { issuedVoucherCode: string } };
+    const voucherCode = okJson.outcome.issuedVoucherCode;
+
+    // Subscriptions & offline router retry queue recorded
+    const subsRes = await api(srv.baseUrl, '/api/subscriptions', { token: adminToken });
+    expect(subsRes.status).toBe(200);
+    const subs = subsRes.json.subscriptions as Array<{ id: string; radiusUsername: string; status: string }>;
+    const jobs = subsRes.json.provisioningJobs as Array<{ id: string; status: string }>;
+    expect(subs.length).toBeGreaterThanOrEqual(1);
+    expect(subs[0].status).toBe('ACTIVE');
+    expect(jobs.some((j) => j.status === 'FAILED_RETRYING')).toBe(true);
+
+    // FreeRADIUS authorize endpoint returns Access-Accept when valid secret supplied
+    const radOk = await api(srv.baseUrl, '/api/radius/authorize', {
+      method: 'POST',
+      headers: { 'x-radius-secret': process.env.RADIUS_SHARED_SECRET },
+      body: { username: voucherCode },
+    });
+    expect(radOk.status).toBe(200);
+    expect(radOk.json.access).toBe('Access-Accept');
+
+    // Suspend subscription -> RADIUS authorize now returns 401 Access-Reject
+    const suspendRes = await api(srv.baseUrl, `/api/subscriptions/${subs[0].id}/suspend`, {
+      method: 'POST',
+      token: adminToken,
+    });
+    expect(suspendRes.status).toBe(200);
+
+    const radSuspended = await api(srv.baseUrl, '/api/radius/authorize', {
+      method: 'POST',
+      headers: { 'x-radius-secret': process.env.RADIUS_SHARED_SECRET },
+      body: { username: voucherCode },
+    });
+    expect(radSuspended.status).toBe(401);
+    expect(radSuspended.json.access).toBe('Access-Reject');
+  });
+
+  it('separates SaaS platform billing ledger from tenant WiFi payments and supports Super Admin governance', async () => {
+    const biz = await api(srv.baseUrl, '/api/auth/register-business', {
+      method: 'POST',
+      body: {
+        businessName: 'Mwanza Hotspot Co',
+        ownerName: 'Neema Peter',
+        ownerEmail: 'neema@mwanzahotspot.co.tz',
+        password: 'MwanzaPassword#2026',
+        phone: '+255765444555',
+        country: 'Tanzania',
+        region: 'Mwanza',
+        planCode: 'STARTER',
+      },
+    });
+    expect(biz.status).toBe(201);
+    const ownerToken = String(biz.json.token);
+    const bizId = String((biz.json.business as Record<string, unknown>).id);
+
+    // Super Admin creates a custom SaaS plan
+    const newPlan = await api(srv.baseUrl, '/api/superadmin/plans', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        code: 'ISP_GOLD',
+        name: 'ISP Gold Tier',
+        priceMonthlyTzs: 95000,
+        priceYearlyTzs: 950000,
+        maxRouters: 15,
+        maxLocations: 8,
+        maxActiveCustomers: 1500,
+        commissionBps: 150,
+      },
+    });
+    expect(newPlan.status).toBe(201);
+
+    // Business Owner upgrades SaaS subscription via Card checkout
+    const upgrade = await api(srv.baseUrl, '/api/business/subscription/checkout', {
+      method: 'POST',
+      token: ownerToken,
+      body: {
+        planCode: 'ISP_GOLD',
+        billingCycle: 'MONTHLY',
+        provider: 'CARD',
+      },
+    });
+    expect(upgrade.status).toBe(201);
+    expect(upgrade.json.amountTzs).toBe(95000);
+
+    // Super Admin sees SaaS revenue in /api/superadmin/overview while WiFi revenue stays separate
+    const overview = await api(srv.baseUrl, '/api/superadmin/overview', { token: adminToken });
+    expect(overview.status).toBe(200);
+    const stats = overview.json.stats as Record<string, unknown>;
+    expect(stats.saasRevenueTzs).toBe(95000);
+    expect(stats.totalWifiRevenueTzs).toBe(0);
+
+    // Super Admin can suspend business and re-activate it
+    const susp = await api(srv.baseUrl, `/api/superadmin/businesses/${bizId}/status`, {
+      method: 'PATCH',
+      token: adminToken,
+      body: { status: 'SUSPENDED' },
+    });
+    expect(susp.status).toBe(200);
+    expect(susp.json.status).toBe('SUSPENDED');
+  });
 });
+

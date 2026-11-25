@@ -5,9 +5,12 @@ import {
   Activity,
   BarChart3,
   Bell,
+  Building2,
   CreditCard,
+  Layers,
   LayoutDashboard,
   LogOut,
+  MapPin,
   Menu,
   Moon,
   Package,
@@ -20,15 +23,18 @@ import {
 } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { LanguageSwitcher } from './components/LanguageSwitcher.tsx';
-import { NETCO_LOGO_URL } from './components/NetcoLogo.tsx';
+import { TraxMark } from './components/NetcoLogo.tsx';
 import { AdminAuthGate, type AuthUser } from './components/AdminAuthGate.tsx';
 import { PortalView } from './components/PortalView.tsx';
+import { SuperAdminView } from './components/SuperAdminView.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
 import { CustomersView } from './components/CustomersView.tsx';
 import { PackagesView } from './components/PackagesView.tsx';
 import { VouchersView } from './components/VouchersView.tsx';
+import { SubscriptionsView } from './components/SubscriptionsView.tsx';
 import { SessionsView } from './components/SessionsView.tsx';
 import { PaymentsView } from './components/PaymentsView.tsx';
+import { LocationsView } from './components/LocationsView.tsx';
 import { RoutersView } from './components/RoutersView.tsx';
 import { ReportsView } from './components/ReportsView.tsx';
 import { NotificationsView } from './components/NotificationsView.tsx';
@@ -38,44 +44,53 @@ import {
   type GlassNavGroup,
   type GlassNavItem,
 } from './components/ui/liquid-glass-expandable-sidebar.tsx';
-import { apiRequest } from './lib/api.ts';
+import { apiRequest, setActiveTenantId } from './lib/api.ts';
 import { auth, syncWorkspacePreference } from './lib/firebase.ts';
 import { getInitialLanguage, saveLanguage, TRANSLATIONS, type AppLanguage } from './lib/i18n.ts';
 
 type AdminSection =
+  | 'superadmin'
   | 'dashboard'
   | 'customers'
   | 'packages'
   | 'vouchers'
+  | 'subscriptions'
   | 'sessions'
   | 'payments'
+  | 'locations'
   | 'routers'
   | 'reports'
   | 'notifications'
   | 'staff';
 
-const SECTION_LABELS: Record<AdminSection, string> = {
-  dashboard: 'Dashboard',
-  customers: 'Customers',
-  packages: 'Packages',
-  vouchers: 'Vouchers',
-  sessions: 'Active Sessions',
-  payments: 'Payments',
-  routers: 'MikroTik Routers',
-  reports: 'Reports & Analytics',
-  notifications: 'Notifications',
-  staff: 'Staff & Audit Logs',
-};
+const VALID_SECTIONS = new Set<AdminSection>([
+  'superadmin',
+  'dashboard',
+  'customers',
+  'packages',
+  'vouchers',
+  'subscriptions',
+  'sessions',
+  'payments',
+  'locations',
+  'routers',
+  'reports',
+  'notifications',
+  'staff',
+]);
 
-function NetcoWorkspace() {
+function TraxLinkWorkspace() {
   const [surface, setSurface] = useState<'admin' | 'portal'>(() =>
-    window.location.pathname === '/admin' ? 'admin' : 'portal'
+    window.location.pathname === '/admin' || window.location.hash === '#admin' ? 'admin' : 'portal'
   );
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [lang, setLang] = useState<AppLanguage>(() => getInitialLanguage());
   const [token, setToken] = useState<string | null>(null);
   const [authSource, setAuthSource] = useState<'SESSION' | 'FIREBASE' | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
+
+  const [activeTenantId, setLocalTenantId] = useState<string | null>(null);
+  const [activeTenantName, setActiveTenantName] = useState<string | null>(null);
 
   const [section, setSection] = useState<AdminSection>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -151,10 +166,13 @@ function NetcoWorkspace() {
   }, [token, refreshTrigger]);
 
   const handleAuthenticated = (newToken: string, authUser: AuthUser, source: 'SESSION' | 'FIREBASE') => {
+    setActiveTenantId(null);
+    setLocalTenantId(null);
+    setActiveTenantName(authUser.businessName || null);
     setToken(newToken);
     setUser(authUser);
     setAuthSource(source);
-    setSection('dashboard');
+    setSection(authUser.role === 'SUPER_ADMIN' ? 'superadmin' : 'dashboard');
   };
 
   const handleLogout = async () => {
@@ -164,10 +182,28 @@ function NetcoWorkspace() {
     if (authSource === 'FIREBASE') {
       await signOut(auth).catch(() => {});
     }
+    setActiveTenantId(null);
+    setLocalTenantId(null);
+    setActiveTenantName(null);
     setToken(null);
     setUser(null);
     setAuthSource(null);
     setMobileMenuOpen(false);
+  };
+
+  const handleSelectTenantWorkspace = (businessId: string, businessName: string) => {
+    setActiveTenantId(businessId);
+    setLocalTenantId(businessId);
+    setActiveTenantName(businessName);
+    setSection('dashboard');
+    setRefreshTrigger((n) => n + 1);
+  };
+
+  const handleClearTenantOverride = () => {
+    setActiveTenantId(null);
+    setLocalTenantId(null);
+    setActiveTenantName(user?.businessName || null);
+    setRefreshTrigger((n) => n + 1);
   };
 
   if (surface === 'portal') {
@@ -200,9 +236,12 @@ function NetcoWorkspace() {
     );
   }
 
-  const isSuperOrAdmin = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN';
-  const isOperator = isSuperOrAdmin || user.role === 'NETWORK_OPERATOR';
-  const isCashier = isSuperOrAdmin || user.role === 'CASHIER';
+  const isSuperAdmin = user.role === 'SUPER_ADMIN';
+  const isBusinessManager = ['SUPER_ADMIN', 'BUSINESS_OWNER', 'ADMIN'].includes(user.role);
+  const isFinance = isBusinessManager || user.role === 'ACCOUNTANT';
+  const isOperator = isBusinessManager || user.role === 'NETWORK_OPERATOR';
+  const isCashier = isBusinessManager || user.role === 'CASHIER' || user.role === 'ACCOUNTANT';
+  const isSupport = isBusinessManager || user.role === 'SUPPORT_STAFF';
 
   const selectSection = (id: AdminSection) => {
     setSection(id);
@@ -211,7 +250,7 @@ function NetcoWorkspace() {
 
   const handleSidebarNavigate = (item: GlassNavItem, event: React.MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
-    if (item.id in SECTION_LABELS) {
+    if (VALID_SECTIONS.has(item.id as AdminSection)) {
       selectSection(item.id as AdminSection);
     }
   };
@@ -219,6 +258,16 @@ function NetcoWorkspace() {
   const tAdmin = TRANSLATIONS[lang].admin;
 
   const navGroups: GlassNavGroup[] = [
+    ...(isSuperAdmin
+      ? [
+          {
+            label: tAdmin.groups.platform,
+            items: [
+              { id: 'superadmin', label: tAdmin.shortSections.superadmin, href: '#superadmin', icon: <Building2 /> },
+            ],
+          },
+        ]
+      : []),
     {
       label: tAdmin.groups.operations,
       items: [
@@ -226,6 +275,7 @@ function NetcoWorkspace() {
         { id: 'customers', label: tAdmin.sections.customers, href: '#customers', icon: <Users /> },
         { id: 'packages', label: tAdmin.sections.packages, href: '#packages', icon: <Package /> },
         { id: 'vouchers', label: tAdmin.sections.vouchers, href: '#vouchers', icon: <Ticket /> },
+        { id: 'subscriptions', label: tAdmin.shortSections.subscriptions, href: '#subscriptions', icon: <Layers /> },
       ],
     },
     {
@@ -239,6 +289,7 @@ function NetcoWorkspace() {
           badge: socketConnected ? tAdmin.liveBadge : undefined,
         },
         { id: 'payments', label: tAdmin.sections.payments, href: '#payments', icon: <CreditCard /> },
+        { id: 'locations', label: tAdmin.shortSections.locations, href: '#locations', icon: <MapPin /> },
         { id: 'routers', label: tAdmin.sections.routers, href: '#routers', icon: <Router /> },
         { id: 'reports', label: tAdmin.shortSections.reports, href: '#reports', icon: <BarChart3 /> },
       ],
@@ -247,29 +298,30 @@ function NetcoWorkspace() {
       label: tAdmin.groups.administration,
       items: [
         { id: 'notifications', label: tAdmin.sections.notifications, href: '#notifications', icon: <Bell /> },
-        ...(isSuperOrAdmin
+        ...(isBusinessManager
           ? [{ id: 'staff', label: tAdmin.shortSections.staff, href: '#staff', icon: <Shield /> }]
           : []),
       ],
     },
   ];
 
-  const userInitials = user.fullName
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? '')
-    .join('') || 'NC';
+  const userInitials =
+    user.fullName
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() ?? '')
+      .join('') || 'TL';
 
   const sidebarAccount = {
-    id: isSuperOrAdmin ? 'staff' : 'dashboard',
+    id: isBusinessManager ? 'staff' : 'dashboard',
     name: user.fullName,
     detail: user.role.replace(/_/g, ' '),
     initials: userInitials,
-    href: isSuperOrAdmin ? '#staff' : '#dashboard',
+    href: isBusinessManager ? '#staff' : '#dashboard',
   };
 
-  const brandIcon = <img src={NETCO_LOGO_URL} alt="NETCO" />;
+  const brandIcon = <TraxMark className="w-6 h-6" />;
   const glassMaterial = {
     blur: 14,
     opacity: 0.72,
@@ -279,25 +331,16 @@ function NetcoWorkspace() {
   };
 
   return (
-    <div className="relative min-h-screen bg-[#F4F7FB] dark:bg-[#080B12] text-slate-900 dark:text-white flex">
-      {/* Subtle ambient backdrop behind glass surfaces */}
-      <div
-        aria-hidden="true"
-        className="no-print pointer-events-none fixed inset-0 overflow-hidden z-0"
-      >
-        <div className="absolute -top-28 -left-24 w-96 h-96 rounded-full bg-[#16B8FF]/14 dark:bg-[#16B8FF]/12 blur-3xl" />
-        <div className="absolute bottom-0 left-10 w-80 h-80 rounded-full bg-sky-500/10 dark:bg-blue-600/10 blur-3xl" />
-      </div>
-
+    <div className="relative min-h-screen bg-stone-100 dark:bg-[#101010] text-[#101010] dark:text-[#FAFAFA] flex">
       {/* Desktop Liquid Glass Expandable Sidebar */}
       <div className="no-print hidden lg:flex shrink-0 sticky top-3 self-start ml-3 my-3 z-20">
         <LiquidGlassExpandableSidebar
-          brand="NETCO"
-          brandDetail={tAdmin.brandDetail}
+          brand="TRAX LINK"
+          brandDetail={activeTenantName || tAdmin.brandDetail}
           brandIcon={brandIcon}
           groups={navGroups}
           activeId={section}
-          accent="#16B8FF"
+          accent="#FFD400"
           glass={glassMaterial}
           account={sidebarAccount}
           onNavigate={handleSidebarNavigate}
@@ -309,7 +352,7 @@ function NetcoWorkspace() {
       {mobileMenuOpen && (
         <div className="no-print fixed inset-0 z-50 lg:hidden flex">
           <div
-            className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs"
+            className="fixed inset-0 bg-black/65 backdrop-blur-xs"
             onClick={() => setMobileMenuOpen(false)}
           />
           <div className="relative z-10 flex flex-col gap-2.5 p-3 max-w-[90vw] h-full">
@@ -325,24 +368,20 @@ function NetcoWorkspace() {
             </div>
             <div className="flex-1 min-h-0 flex">
               <LiquidGlassExpandableSidebar
-                brand="NETCO"
-                brandDetail={tAdmin.brandDetail}
+                brand="TRAX LINK"
+                brandDetail={activeTenantName || tAdmin.brandDetail}
                 brandIcon={brandIcon}
                 groups={navGroups}
                 activeId={section}
                 defaultExpanded={true}
-                accent="#16B8FF"
+                accent="#FFD400"
                 glass={glassMaterial}
                 account={sidebarAccount}
                 onNavigate={handleSidebarNavigate}
                 style={{ '--gn-sidebar-inset': '132px' } as React.CSSProperties}
               />
             </div>
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="btn-secondary w-full text-xs shadow-md"
-            >
+            <button type="button" onClick={handleLogout} className="btn-secondary w-full text-xs shadow-md">
               <LogOut className="w-3.5 h-3.5" />
               {tAdmin.signOut}
             </button>
@@ -353,7 +392,7 @@ function NetcoWorkspace() {
       {/* Main Content Area */}
       <div className="relative z-10 flex-1 flex flex-col min-w-0">
         {/* Top Bar */}
-        <header className="no-print h-14 sm:h-16 px-3 sm:px-6 border-b border-slate-200/80 dark:border-slate-800/90 bg-white/80 dark:bg-[#101827]/85 backdrop-blur-md flex items-center justify-between gap-2 sm:gap-4 sticky top-0 z-10">
+        <header className="no-print h-14 sm:h-16 px-3 sm:px-6 border-b border-stone-200 dark:border-zinc-800 bg-white/90 dark:bg-[#161618]/90 backdrop-blur-md flex items-center justify-between gap-2 sm:gap-4 sticky top-0 z-10">
           <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
             <button
               type="button"
@@ -364,23 +403,26 @@ function NetcoWorkspace() {
               <Menu className="w-5 h-5" />
             </button>
             <div className="text-xs sm:text-sm font-medium truncate">
-              <span className="hidden sm:inline text-slate-400 dark:text-[#8793A5]">NETCO</span>
-              <span className="hidden sm:inline mx-2 text-slate-300 dark:text-slate-700">/</span>
-              <span className="font-semibold text-slate-900 dark:text-white">{tAdmin.sections[section]}</span>
+              <span className="hidden sm:inline text-zinc-400">
+                {activeTenantName || user.businessName || 'TRAX LINK'}
+              </span>
+              <span className="hidden sm:inline mx-2 text-zinc-600">/</span>
+              <span className="font-semibold text-[#101010] dark:text-white">{tAdmin.sections[section]}</span>
             </div>
+            {isSuperAdmin && activeTenantId && (
+              <button
+                type="button"
+                onClick={handleClearTenantOverride}
+                className="hidden md:inline-flex btn-chip-warn text-[11px]"
+              >
+                Exit Tenant Scope
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
-            <span className="hidden md:inline-flex items-center px-2 py-1 rounded-md text-[11px] font-mono bg-[#16B8FF]/10 text-[#0284C7] dark:text-[#16B8FF] border border-[#16B8FF]/25">
+            <span className="hidden xl:inline-flex items-center px-2 py-1 rounded-md text-[11px] font-mono bg-[#FFD400]/12 text-[#9A7B00] dark:text-[#FFD400] border border-[#FFD400]/30">
               {operatingMode === 'STANDALONE_MODE' ? tAdmin.standaloneBadge : tAdmin.mikrotikBadge}
-            </span>
-            <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-mono text-slate-500 dark:text-[#8793A5] mr-1">
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  socketConnected ? 'bg-emerald-500' : 'bg-slate-400'
-                }`}
-              />
-              {socketConnected ? tAdmin.live : tAdmin.connecting}
             </span>
 
             <LanguageSwitcher lang={lang} onToggleLang={toggleLang} />
@@ -422,37 +464,62 @@ function NetcoWorkspace() {
         </header>
 
         <main className="flex-1 p-3.5 sm:p-6 max-w-[1440px] w-full mx-auto">
+          {section === 'superadmin' && isSuperAdmin && (
+            <SuperAdminView
+              token={token}
+              refreshTrigger={refreshTrigger}
+              activeTenantId={activeTenantId}
+              onSelectTenant={handleSelectTenantWorkspace}
+            />
+          )}
           {section === 'dashboard' && (
-            <DashboardView token={token} refreshTrigger={refreshTrigger} onNavigate={(s) => setSection(s as AdminSection)} />
+            <DashboardView
+              token={token}
+              refreshTrigger={refreshTrigger}
+              onNavigate={(s) => setSection(s as AdminSection)}
+            />
           )}
           {section === 'customers' && (
-            <CustomersView token={token} canEdit={isCashier} canDelete={isSuperOrAdmin} />
+            <CustomersView token={token} canEdit={isCashier} canDelete={isBusinessManager} />
           )}
-          {section === 'packages' && <PackagesView token={token} canManage={isSuperOrAdmin} />}
+          {section === 'packages' && <PackagesView token={token} canManage={isBusinessManager} />}
           {section === 'vouchers' && (
             <VouchersView
               token={token}
               refreshTrigger={refreshTrigger}
               canGenerate={isCashier}
-              canRevoke={isSuperOrAdmin}
+              canRevoke={isBusinessManager}
+            />
+          )}
+          {section === 'subscriptions' && (
+            <SubscriptionsView
+              token={token}
+              refreshTrigger={refreshTrigger}
+              canManage={isOperator || isFinance}
+              canSupport={isSupport}
             />
           )}
           {section === 'sessions' && (
             <SessionsView token={token} refreshTrigger={refreshTrigger} canControl={isOperator} />
           )}
           {section === 'payments' && (
-            <PaymentsView token={token} refreshTrigger={refreshTrigger} canRefund={isSuperOrAdmin} />
+            <PaymentsView token={token} refreshTrigger={refreshTrigger} canRefund={isFinance} />
+          )}
+          {section === 'locations' && (
+            <LocationsView token={token} refreshTrigger={refreshTrigger} canManage={isBusinessManager} />
           )}
           {section === 'routers' && (
             <RoutersView
               token={token}
               refreshTrigger={refreshTrigger}
               canManage={isOperator}
-              canDelete={isSuperOrAdmin}
+              canDelete={isBusinessManager}
             />
           )}
           {section === 'reports' && <ReportsView token={token} />}
-          {section === 'notifications' && <NotificationsView token={token} refreshTrigger={refreshTrigger} />}
+          {section === 'notifications' && (
+            <NotificationsView token={token} refreshTrigger={refreshTrigger} />
+          )}
           {section === 'staff' && <StaffAuditView token={token} currentRole={user.role} />}
         </main>
       </div>
@@ -463,7 +530,7 @@ function NetcoWorkspace() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <NetcoWorkspace />
+      <TraxLinkWorkspace />
     </ErrorBoundary>
   );
 }

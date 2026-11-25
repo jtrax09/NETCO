@@ -30,6 +30,7 @@ export function createVoucherBatch(
     count: number;
     customerId?: string | null;
     createdById?: string | null;
+    businessId?: string | null;
     isTest?: boolean;
     testNote?: string | null;
   }
@@ -39,17 +40,27 @@ export function createVoucherBatch(
   }
 
   const pkg = db
-    .prepare('SELECT id, name, is_active FROM packages WHERE id = ?')
-    .get(params.packageId) as { id: string; name: string; is_active: number } | undefined;
+    .prepare('SELECT id, business_id, name, is_active FROM packages WHERE id = ?')
+    .get(params.packageId) as { id: string; business_id: string; name: string; is_active: number } | undefined;
 
   if (!pkg) {
     throw new VoucherError('Assigned package not found', 404, 'PACKAGE_NOT_FOUND');
   }
+  if (params.businessId && pkg.business_id !== params.businessId) {
+    throw new VoucherError('Package belongs to a different business workspace', 403, 'CROSS_TENANT_FORBIDDEN');
+  }
+
+  const tenantBusinessId = pkg.business_id;
 
   if (params.customerId) {
-    const cust = db.prepare('SELECT id FROM customers WHERE id = ?').get(params.customerId);
+    const cust = db
+      .prepare('SELECT id, business_id FROM customers WHERE id = ?')
+      .get(params.customerId) as { id: string; business_id: string } | undefined;
     if (!cust) {
       throw new VoucherError('Assigned customer not found', 404, 'CUSTOMER_NOT_FOUND');
+    }
+    if (cust.business_id !== tenantBusinessId) {
+      throw new VoucherError('Customer belongs to a different business workspace', 403, 'CROSS_TENANT_FORBIDDEN');
     }
   }
 
@@ -61,13 +72,14 @@ export function createVoucherBatch(
   return withTransaction(db, () => {
     const insertStmt = db.prepare(`
       INSERT INTO vouchers (
-        id, code_hash, code_encrypted, code_masked, batch_id,
+        id, business_id, code_hash, code_encrypted, code_masked, batch_id,
         package_id, customer_id, status, is_test, test_note, created_by_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'UNUSED', ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNUSED', ?, ?, ?, ?, ?)
     `);
 
     const created: Array<{
       id: string;
+      businessId: string;
       code: string;
       codeMasked: string;
       batchId: string | null;
@@ -81,7 +93,6 @@ export function createVoucherBatch(
     for (let i = 0; i < params.count; i++) {
       let code = generateVoucherCode();
       let codeHash = sha256(code);
-      // Ensure cryptographic uniqueness even in large batches
       while (db.prepare('SELECT 1 FROM vouchers WHERE code_hash = ?').get(codeHash)) {
         code = generateVoucherCode();
         codeHash = sha256(code);
@@ -91,6 +102,7 @@ export function createVoucherBatch(
       const masked = maskVoucherCode(code);
       insertStmt.run(
         id,
+        tenantBusinessId,
         codeHash,
         encryptSecret(code),
         masked,
@@ -106,6 +118,7 @@ export function createVoucherBatch(
 
       created.push({
         id,
+        businessId: tenantBusinessId,
         code,
         codeMasked: masked,
         batchId,
@@ -131,13 +144,15 @@ export function validateVoucherCode(db: NetcoDb, code: string) {
   const codeHash = sha256(normalizedCode);
   const row = db
     .prepare(`
-      SELECT v.id, v.code_masked, v.status, v.bound_device_id, v.bound_device_name,
+      SELECT v.id, v.business_id, v.code_masked, v.status, v.bound_device_id, v.bound_device_name,
              v.is_test, v.test_note, v.created_at, v.activated_at, v.expires_at,
              v.revoked_at, v.revoked_reason,
              p.name as package_name, p.category, p.price_tzs, p.duration_minutes,
-             p.download_kbps, p.upload_kbps, p.data_limit_mb
+             p.download_kbps, p.upload_kbps, p.data_limit_mb,
+             b.name as business_name
       FROM vouchers v
       JOIN packages p ON p.id = v.package_id
+      LEFT JOIN businesses b ON b.id = v.business_id
       WHERE v.code_hash = ?
     `)
     .get(codeHash) as Record<string, unknown> | undefined;
@@ -147,12 +162,13 @@ export function validateVoucherCode(db: NetcoDb, code: string) {
   }
 
   const status = String(row.status);
-  // Single-use policy: only an UNUSED voucher is valid for redemption
   const valid = status === 'UNUSED';
 
   return {
     valid,
     status,
+    businessId: String(row.business_id),
+    businessName: row.business_name ? String(row.business_name) : 'TRAX LINK Hotspot',
     codeMasked: String(row.code_masked),
     packageName: String(row.package_name),
     category: String(row.category),
@@ -210,9 +226,11 @@ export function redeemVoucherForDevice(
   return withTransaction(db, () => {
     const voucher = db
       .prepare(`
-        SELECT v.*, p.name as package_name, p.duration_minutes, p.download_kbps, p.upload_kbps, p.data_limit_mb, p.category
+        SELECT v.*, p.name as package_name, p.duration_minutes, p.download_kbps, p.upload_kbps, p.data_limit_mb, p.category,
+               b.name as business_name
         FROM vouchers v
         JOIN packages p ON p.id = v.package_id
+        LEFT JOIN businesses b ON b.id = v.business_id
         WHERE v.code_hash = ?
       `)
       .get(codeHash) as Record<string, unknown> | undefined;
@@ -221,7 +239,8 @@ export function redeemVoucherForDevice(
       throw new VoucherError('Voucher code not recognized.', 404, 'VOUCHER_NOT_FOUND');
     }
 
-    // Upsert device record (preserve original device_label once set)
+    const businessId = String(voucher.business_id);
+
     let device = db
       .prepare('SELECT * FROM devices WHERE device_fingerprint = ?')
       .get(fp) as Record<string, unknown> | undefined;
@@ -229,10 +248,11 @@ export function redeemVoucherForDevice(
     if (!device) {
       const deviceId = generateId('dev');
       db.prepare(`
-        INSERT INTO devices (id, device_fingerprint, mac_address, user_agent, device_label, customer_id, first_seen_at, last_seen_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO devices (id, business_id, device_fingerprint, mac_address, user_agent, device_label, customer_id, first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         deviceId,
+        businessId,
         fp,
         params.macAddress ?? null,
         params.userAgent ?? null,
@@ -283,8 +303,6 @@ export function redeemVoucherForDevice(
       throw new VoucherError('This voucher has expired and can no longer be used.', 403, 'VOUCHER_EXPIRED');
     }
 
-    // Strict Single-Use + One-Device-Name Enforcement:
-    // Once a voucher has left UNUSED (activated_at is set or status === 'ACTIVE'), NEVER allow a second redemption.
     if (voucherStatus !== 'UNUSED' || voucher.activated_at !== null) {
       const boundName = voucher.bound_device_name
         ? String(voucher.bound_device_name)
@@ -303,10 +321,11 @@ export function redeemVoucherForDevice(
 
       if (isDifferentDeviceOrName) {
         db.prepare(`
-          INSERT INTO notifications (id, type, severity, title, message, metadata)
-          VALUES (?, 'SUSPICIOUS_ACTIVITY', 'WARNING', ?, ?, ?)
+          INSERT INTO notifications (id, business_id, type, severity, title, message, metadata)
+          VALUES (?, ?, 'SUSPICIOUS_ACTIVITY', 'WARNING', ?, ?, ?)
         `).run(
           generateId('ntf'),
+          businessId,
           `Multi-Device / Reuse Attempt Blocked (${voucher.code_masked})`,
           `Device "${cleanDeviceName}" (${params.ipAddress || fp.slice(0, 10)}) tried to reuse a single-use voucher locked to "${boundName}".`,
           JSON.stringify({
@@ -331,7 +350,6 @@ export function redeemVoucherForDevice(
       );
     }
 
-    // First and only allowed redemption (UNUSED -> ACTIVE)
     const expiresAt = new Date(now.getTime() + Number(voucher.duration_minutes) * 60_000).toISOString();
     const sessionToken = generateSessionToken();
     const sessionId = generateId('ses');
@@ -355,11 +373,12 @@ export function redeemVoucherForDevice(
 
     db.prepare(`
       INSERT INTO sessions (
-        id, session_token, voucher_id, device_id, customer_id, router_id,
+        id, business_id, session_token, voucher_id, device_id, customer_id, router_id,
         ip_address, status, started_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
     `).run(
       sessionId,
+      businessId,
       sessionToken,
       voucherId,
       deviceId,
@@ -373,10 +392,11 @@ export function redeemVoucherForDevice(
     logRedemption(true, `Single-use activation locked to device name "${cleanDeviceName}"`);
 
     db.prepare(`
-      INSERT INTO notifications (id, type, severity, title, message, metadata)
-      VALUES (?, 'VOUCHER_ACTIVATED', 'INFO', ?, ?, ?)
+      INSERT INTO notifications (id, business_id, type, severity, title, message, metadata)
+      VALUES (?, ?, 'VOUCHER_ACTIVATED', 'INFO', ?, ?, ?)
     `).run(
       generateId('ntf'),
+      businessId,
       `Voucher Activated (${voucher.code_masked})`,
       `Package ${voucher.package_name} activated once and locked to device "${cleanDeviceName}".`,
       JSON.stringify({ voucherId, sessionId, deviceId, boundDeviceName: cleanDeviceName })
@@ -386,6 +406,8 @@ export function redeemVoucherForDevice(
       reconnected: false,
       sessionId,
       sessionToken,
+      businessId,
+      businessName: voucher.business_name ? String(voucher.business_name) : 'TRAX LINK Hotspot',
       voucherId,
       codeMasked: String(voucher.code_masked),
       packageName: String(voucher.package_name),

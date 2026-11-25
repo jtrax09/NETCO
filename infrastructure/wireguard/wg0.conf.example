@@ -1,0 +1,13 @@
+# TRAX LINK Cloud Hub — WireGuard Server Template
+# Replace placeholders with generated keys on Ubuntu LTS host (`wg genkey | tee privatekey | wg pubkey`).
+
+[Interface]
+Address = 10.66.0.1/16
+ListenPort = 51820
+PrivateKey = REPLACE_WITH_SERVER_PRIVATE_KEY
+SaveConfig = false
+
+# Example MikroTik CHR / Hardware Peer (added per Business Router)
+# [Peer]
+# PublicKey = REPLACE_WITH_MIKROTIK_WG_PUBLIC_KEY
+# AllowedIPs = 10.66.1.2/32

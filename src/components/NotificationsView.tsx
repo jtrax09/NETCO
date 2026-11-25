@@ -81,7 +81,7 @@ export function NotificationsView({ token, refreshTrigger }: Props) {
         </div>
       )}
 
-      <div className="bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl divide-y divide-slate-100 dark:divide-slate-800">
+      <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl divide-y divide-stone-100 dark:divide-white/10">
         {loading ? (
           <div className="p-8 text-center text-xs text-slate-500">Loading alerts...</div>
         ) : items.length === 0 ? (
@@ -98,7 +98,7 @@ export function NotificationsView({ token, refreshTrigger }: Props) {
                     className={
                       n.severity === 'WARNING'
                         ? 'text-amber-600 dark:text-amber-400 font-semibold font-mono'
-                        : 'text-[#0284C7] dark:text-[#16B8FF] font-semibold font-mono'
+                        : 'text-[#9A7B00] dark:text-[#FFD400] font-semibold font-mono'
                     }
                   >
                     {n.type}

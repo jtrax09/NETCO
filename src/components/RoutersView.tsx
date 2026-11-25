@@ -1,15 +1,18 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Plus, RefreshCw, Router as RouterIcon, ShieldAlert, Trash2, Wifi, X } from 'lucide-react';
+import { Activity, Check, Copy, KeyRound, Plus, RefreshCw, Router as RouterIcon, ShieldAlert, Trash2, Wifi, X } from 'lucide-react';
 import { apiRequest, formatBytes } from '../lib/api.ts';
 
 interface RouterItem {
   id: string;
+  locationId?: string | null;
+  locationName?: string | null;
   name: string;
   host: string;
   apiPort: number;
   useTls: number;
   username: string;
   hotspotServer: string;
+  routerOsFamily?: 'ROUTEROS_V6' | 'ROUTEROS_V7';
   status: 'CONNECTED' | 'NOT_CONNECTED' | 'ERROR';
   cpuLoad: number | null;
   memoryUsedBytes: number | null;
@@ -19,6 +22,12 @@ interface RouterItem {
   boardName: string | null;
   lastError: string | null;
   lastCheckedAt: string | null;
+}
+
+interface LocationOption {
+  id: string;
+  name: string;
+  region: string;
 }
 
 interface RouterInterface {
@@ -48,6 +57,7 @@ interface Props {
 
 export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Props) {
   const [routers, setRouters] = useState<RouterItem[]>([]);
+  const [locations, setLocations] = useState<LocationOption[]>([]);
   const [modeInfo, setModeInfo] = useState<SystemModeInfo | null>(null);
   const [switchingMode, setSwitchingMode] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -65,6 +75,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [hotspotServer, setHotspotServer] = useState('');
+  const [locationId, setLocationId] = useState('');
+  const [routerOsFamily, setRouterOsFamily] = useState<'ROUTEROS_V6' | 'ROUTEROS_V7'>('ROUTEROS_V7');
   const [saving, setSaving] = useState(false);
 
   const [selectedIfaces, setSelectedIfaces] = useState<{
@@ -72,15 +84,24 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     interfaces: RouterInterface[];
   } | null>(null);
 
+  const [snippetModal, setSnippetModal] = useState<{
+    routerName: string;
+    routerOsFamily: string;
+    snippet: string;
+  } | null>(null);
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
+
   const load = async () => {
     setLoading(true);
     try {
-      const [res, mRes] = await Promise.all([
+      const [res, mRes, locRes] = await Promise.all([
         apiRequest<{ routers: RouterItem[] }>('/api/routers', { token }),
         apiRequest<SystemModeInfo>('/api/system/mode'),
+        apiRequest<{ locations: LocationOption[] }>('/api/locations', { token }).catch(() => ({ locations: [] })),
       ]);
       setRouters(res.routers);
       setModeInfo(mRes);
+      setLocations(locRes.locations);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load routers');
     } finally {
@@ -124,6 +145,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     setUsername('');
     setPassword('');
     setHotspotServer('');
+    setLocationId(locations[0]?.id || '');
+    setRouterOsFamily('ROUTEROS_V7');
     setError(null);
     setModalOpen(true);
   };
@@ -137,6 +160,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     setUsername(r.username);
     setPassword('');
     setHotspotServer(r.hotspotServer);
+    setLocationId(r.locationId || '');
+    setRouterOsFamily(r.routerOsFamily || 'ROUTEROS_V7');
     setError(null);
     setModalOpen(true);
   };
@@ -165,6 +190,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
             username: username.trim(),
             ...(password.trim() ? { password: password.trim() } : {}),
             hotspotServer: hotspotServer.trim(),
+            locationId: locationId || null,
+            routerOsFamily,
           },
         });
       } else {
@@ -179,6 +206,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
             username: username.trim(),
             password: password.trim(),
             hotspotServer: hotspotServer.trim(),
+            locationId: locationId || null,
+            routerOsFamily,
           },
         });
       }
@@ -239,6 +268,23 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     }
   };
 
+  const handleViewSnippet = async (r: RouterItem) => {
+    try {
+      setCopiedSnippet(false);
+      const res = await apiRequest<{ snippet: string; routerOsFamily: string }>(
+        `/api/routers/${r.id}/wireguard-snippet`,
+        { token }
+      );
+      setSnippetModal({
+        routerName: r.name,
+        routerOsFamily: res.routerOsFamily,
+        snippet: res.snippet,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to generate WireGuard + RADIUS script');
+    }
+  };
+
   const handleDelete = async (id: string) => {
     try {
       await apiRequest(`/api/routers/${id}`, { method: 'DELETE', token });
@@ -253,13 +299,13 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
   return (
     <div className="space-y-6">
       {/* Operating Mode & Status Header */}
-      <div className="p-4 sm:p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-4">
+      <div className="p-4 sm:p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <span
               className={`px-2.5 py-1 rounded-md text-xs font-mono font-semibold ${
                 operatingMode === 'STANDALONE_MODE'
-                  ? 'bg-[#16B8FF]/15 text-[#0284C7] dark:text-[#16B8FF] border border-[#16B8FF]/30'
+                  ? 'bg-[#FFD400]/15 text-[#9A7B00] dark:text-[#FFD400] border border-[#FFD400]/30'
                   : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
               }`}
             >
@@ -271,7 +317,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
           </div>
           <p className="text-xs text-slate-500 dark:text-[#8793A5]">
             {modeInfo?.airtelPocketWifiNotice ||
-              'NETCO operates fully in Standalone Mode without MikroTik hardware. RouterOS credentials are optional and stored encrypted.'}
+              'TRAX LINK operates fully in Standalone Mode without MikroTik hardware. RouterOS credentials are optional and stored encrypted.'}
           </p>
         </div>
 
@@ -324,8 +370,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
       {loading ? (
         <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Loading router configuration...</div>
       ) : routers.length === 0 ? (
-        <div className="p-6 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 grid grid-cols-1 md:grid-cols-12 gap-6 items-center">
-          <div className="md:col-span-4 aspect-square max-h-56 w-full rounded-xl overflow-hidden bg-[#080B12] border border-slate-800">
+        <div className="p-6 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 grid grid-cols-1 md:grid-cols-12 gap-6 items-center">
+          <div className="md:col-span-4 aspect-square max-h-56 w-full rounded-xl overflow-hidden bg-[#101010] border border-white/10">
             {!imgFailed ? (
               <img
                 src="/src/assets/images/mikrotik_router_unit_1795279657733.jpg"
@@ -335,7 +381,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                 className="w-full h-full object-cover"
               />
             ) : (
-              <div className="w-full h-full flex items-center justify-center text-[#16B8FF]">
+              <div className="w-full h-full flex items-center justify-center text-[#FFD400]">
                 <RouterIcon className="w-12 h-12" />
               </div>
             )}
@@ -345,13 +391,13 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
               <span className="text-xs font-mono font-semibold text-amber-600 dark:text-amber-400">
                 No MikroTik router connected
               </span>
-              <span className="px-2 py-0.5 rounded bg-[#16B8FF]/15 text-[#0284C7] dark:text-[#16B8FF] text-[11px] font-mono font-semibold">
+              <span className="px-2 py-0.5 rounded bg-[#FFD400]/15 text-[#9A7B00] dark:text-[#FFD400] text-[11px] font-mono font-semibold">
                 Standalone Mode Active
               </span>
             </div>
             <h3 className="text-lg font-bold">No MikroTik Router Configured — Running in Standalone Mode</h3>
             <p className="text-xs text-slate-500 dark:text-[#8793A5] leading-relaxed">
-              NETCO does not require MikroTik credentials, IP addresses, or RouterOS hardware to operate. Customer management, packages, voucher tokens, single-device session limits, payment records, and analytics all work natively with your SQLite database.
+              TRAX LINK does not require MikroTik credentials, IP addresses, or RouterOS hardware to operate. Multi-tenant customers, packages, voucher tokens, single-device session limits, payment records, and analytics all work natively with your workspace database.
             </p>
 
             <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/25 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2">
@@ -359,7 +405,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
               <div>
                 <p className="font-semibold">Using an Airtel Pocket WiFi?</p>
                 <p className="text-[11px] opacity-90 mt-0.5">
-                  Consumer pocket WiFi hotspots do not expose RouterOS API packet enforcement. When you later connect a MikroTik router (e.g. hAP ac2, RB750Gr3, or CCR2004), use &ldquo;Connect Router&rdquo; to enable automated captive-portal bandwidth queues and session enforcement.
+                  Consumer pocket WiFi hotspots do not expose RouterOS API packet enforcement. When you later connect a MikroTik router (e.g. hAP ac2, RB750Gr3, or CCR2004), use &ldquo;Connect Router&rdquo; to enable automated captive-portal bandwidth queues, WireGuard VPN, and RADIUS session enforcement.
                 </p>
               </div>
             </div>
@@ -381,7 +427,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
           {routers.map((r) => (
             <div
               key={r.id}
-              className="p-5 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 space-y-4"
+              className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-4"
             >
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -399,6 +445,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                   </div>
                   <p className="text-xs font-mono text-slate-500 dark:text-[#8793A5] mt-0.5">
                     {r.host ? `${r.host}:${r.apiPort} ${r.useTls ? 'TLS' : 'TCP'}` : 'Host not configured'}
+                    {r.locationName ? ` · Site: ${r.locationName}` : ''}
+                    {r.routerOsFamily ? ` · ${r.routerOsFamily.replace('ROUTEROS_', 'ROS ')}` : ''}
                     {r.username ? ` · User: ${r.username}` : ''}
                     {r.hotspotServer ? ` · Server: ${r.hotspotServer}` : ''}
                   </p>
@@ -418,7 +466,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
               </div>
 
               {r.status === 'CONNECTED' ? (
-                <div className="grid grid-cols-3 gap-3 p-3 rounded-lg bg-slate-50 dark:bg-[#080B12] border border-slate-200 dark:border-slate-800 text-xs tabular-nums">
+                <div className="grid grid-cols-3 gap-3 p-3 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10 text-xs tabular-nums">
                   <div>
                     <span className="text-slate-500 dark:text-[#8793A5] block">CPU Load</span>
                     <span className="font-mono font-bold text-sm">{r.cpuLoad ?? 0}%</span>
@@ -435,7 +483,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                   </div>
                 </div>
               ) : (
-                <div className="p-3 rounded-lg bg-slate-50 dark:bg-[#080B12] border border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-[#8793A5]">
+                <div className="p-3 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10 text-xs text-slate-500 dark:text-[#8793A5]">
                   {r.lastError || 'Standalone Mode active — run a connection test once MikroTik RouterOS hardware is reachable.'}
                 </div>
               )}
@@ -463,7 +511,17 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                     </>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {canManage && (
+                    <button
+                      type="button"
+                      onClick={() => handleViewSnippet(r)}
+                      className="btn-chip-accent"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      WireGuard + RADIUS
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => handleViewInterfaces(r)}
@@ -490,7 +548,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
 
       {modalOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">{editing ? 'Edit MikroTik Router' : 'Connect MikroTik Router (Optional)'}</h3>
               <button
@@ -514,8 +572,36 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Dar Main Gateway CCR2004"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                 />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block font-medium mb-1">Location (Optional)</label>
+                  <select
+                    value={locationId}
+                    onChange={(e) => setLocationId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
+                  >
+                    <option value="">Unassigned</option>
+                    {locations.map((loc) => (
+                      <option key={loc.id} value={loc.id}>
+                        {loc.name} ({loc.region})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">RouterOS Family</label>
+                  <select
+                    value={routerOsFamily}
+                    onChange={(e) => setRouterOsFamily(e.target.value as 'ROUTEROS_V6' | 'ROUTEROS_V7')}
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
+                  >
+                    <option value="ROUTEROS_V7">RouterOS v7.x</option>
+                    <option value="ROUTEROS_V6">RouterOS v6.43+</option>
+                  </select>
+                </div>
               </div>
               <div className="grid grid-cols-3 gap-2">
                 <div className="col-span-2">
@@ -524,8 +610,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                     type="text"
                     value={host}
                     onChange={(e) => setHost(e.target.value)}
-                    placeholder="e.g. 10.8.0.1 or 192.168.88.1"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    placeholder="e.g. 10.66.0.10 or 192.168.88.1"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
                 <div>
@@ -535,7 +621,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                     value={apiPort}
                     onChange={(e) => setApiPort(e.target.value)}
                     placeholder="8728"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
               </div>
@@ -547,7 +633,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     placeholder="Optional"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
                 <div>
@@ -559,7 +645,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Optional"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12]"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
                   />
                 </div>
               </div>
@@ -571,7 +657,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                     value={hotspotServer}
                     onChange={(e) => setHotspotServer(e.target.value)}
                     placeholder="Optional"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080B12] font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                   />
                 </div>
                 <label className="flex items-center gap-2 pt-5 cursor-pointer">
@@ -602,7 +688,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
 
       {selectedIfaces && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-xl w-full bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+          <div className="max-w-xl w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">{selectedIfaces.routerName} — Interfaces</h3>
               <button
@@ -621,7 +707,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
             ) : (
               <div className="overflow-x-auto max-h-80">
                 <table className="w-full text-left text-xs">
-                  <thead className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
+                  <thead className="border-b border-stone-200 dark:border-white/10 text-slate-500">
                     <tr>
                       <th className="py-2">Interface</th>
                       <th className="py-2">Type</th>
@@ -630,7 +716,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                       <th className="py-2 text-right">TX</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono tabular-nums">
+                  <tbody className="divide-y divide-stone-100 dark:divide-white/10 font-mono tabular-nums">
                     {selectedIfaces.interfaces.map((i) => (
                       <tr key={i.id}>
                         <td className="py-2 font-medium">{i.name}</td>
@@ -644,6 +730,48 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                 </table>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {snippetModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="max-w-2xl w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-semibold">
+                  {snippetModal.routerName} — WireGuard + FreeRADIUS Script
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-[#8793A5]">
+                  Target: {snippetModal.routerOsFamily} · Paste into MikroTik Terminal once hardware is connected.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSnippetModal(null)}
+                aria-label="Close WireGuard snippet modal"
+                className="btn-icon min-h-[34px] min-w-[34px] p-1.5"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="p-4 rounded-xl bg-[#101010] border border-white/10 text-[11px] font-mono text-zinc-100 overflow-x-auto max-h-96 whitespace-pre">
+              {snippetModal.snippet}
+            </pre>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  await navigator.clipboard.writeText(snippetModal.snippet).catch(() => {});
+                  setCopiedSnippet(true);
+                  setTimeout(() => setCopiedSnippet(false), 2000);
+                }}
+                className="btn-primary text-xs"
+              >
+                {copiedSnippet ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                {copiedSnippet ? 'Copied Script' : 'Copy RouterOS Script'}
+              </button>
+            </div>
           </div>
         </div>
       )}

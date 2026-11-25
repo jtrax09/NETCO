@@ -98,12 +98,12 @@ export function SessionsView({ token, refreshTrigger, canControl }: Props) {
         )}
       </div>
 
-      <div className="p-4 rounded-xl bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-[#8793A5] space-y-1">
+      <div className="p-4 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 text-xs text-slate-600 dark:text-[#8793A5] space-y-1">
         <p className="font-semibold text-slate-900 dark:text-white">
           Network Access Control & One-Device Enforcement Scope
         </p>
         <p>
-          NETCO binds each voucher to a single authenticated device session in an atomic database transaction. Packet-level bandwidth queues, MAC/IP firewall drops, and hotspot active-list termination are enforced on MikroTik hardware when a RouterOS device is connected. Software portals cannot disable a smartphone&apos;s built-in tethering toggle.
+          TRAX LINK binds each voucher to a single authenticated device session in an atomic database transaction. Packet-level bandwidth queues, MAC/IP firewall drops, and hotspot active-list termination are enforced on MikroTik hardware when a RouterOS device is connected. Software portals cannot disable a smartphone&apos;s built-in tethering toggle.
         </p>
       </div>
 
@@ -113,7 +113,7 @@ export function SessionsView({ token, refreshTrigger, canControl }: Props) {
         </div>
       )}
 
-      <div className="bg-white dark:bg-[#101827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+      <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl overflow-hidden">
         {loading ? (
           <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Loading sessions...</div>
         ) : sessions.length === 0 ? (
