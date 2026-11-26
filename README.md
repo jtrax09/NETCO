@@ -37,8 +37,8 @@ TRAX LINK is a full-stack multi-tenant WiFi billing, voucher token, Tanzanian mo
 ## Quick Start (Local Development)
 
 ### Prerequisites
-- **Node.js `22.x` or newer** (provides `node:sqlite`)
-- **npm**
+- **Python `3.11+`** (zero external pip dependencies required — pure standard library billing engine in `python_backend/`)
+- **Node.js `22.x` or newer** + **npm** (Vite frontend & Socket.IO gateway)
 
 ### Setup & Run
 ```bash
@@ -47,8 +47,13 @@ cp .env.example .env
 npm run dev
 ```
 
+You can also run the Python WiFi Billing API directly:
+```bash
+python3 -m python_backend --host 127.0.0.1 --port 8001
+```
+
 Open:
-- **Customer Portal**: `http://localhost:3000/`
+- **Customer WiFi Portal (Default Landing)**: `http://localhost:3000/`
 - **Business & Super Admin Console**: `http://localhost:3000/#admin`
 
 ---
@@ -56,6 +61,7 @@ Open:
 ## Testing & Verification
 
 ```bash
+python3 -m unittest discover -s python_backend/tests -v
 npm run lint
 npm test
 npx eslint firestore.rules

@@ -1,23 +1,28 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { AnimatePresence, LayoutGroup, motion } from 'motion/react';
 import {
   AlertCircle,
   Building2,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clock,
   Copy,
   CreditCard,
+  Info,
   KeyRound,
   LifeBuoy,
+  Lock,
   LogOut,
   Moon,
   Phone,
   Search,
-  ShieldAlert,
   ShieldCheck,
   Smartphone,
   Sun,
   Ticket,
+  UserCircle2,
   Wifi,
 } from 'lucide-react';
 import {
@@ -30,6 +35,7 @@ import { formatDurationLocalized, TRANSLATIONS, type AppLanguage } from '../lib/
 import { PAYMENT_PROVIDER_BRANDS } from '../lib/paymentProviders.ts';
 import { LanguageSwitcher } from './LanguageSwitcher.tsx';
 import { TraxLogo } from './NetcoLogo.tsx';
+import { MobilePageTransition, NATIVE_SPRING } from './ui/MotionPrimitives.tsx';
 
 interface PortalBusiness {
   id: string;
@@ -143,6 +149,8 @@ interface Props {
   onToggleLang: () => void;
 }
 
+type CategoryFilter = 'ALL' | 'HOURLY' | 'DAILY' | 'WEEKLY' | 'MONTHLY';
+
 function getOrCreateDeviceFingerprint(): string {
   const storageKey = 'netco_device_fp';
   try {
@@ -152,7 +160,8 @@ function getOrCreateDeviceFingerprint(): string {
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
         : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-    const screenInfo = typeof window !== 'undefined' ? `${window.screen?.width || 0}x${window.screen?.height || 0}` : '0x0';
+    const screenInfo =
+      typeof window !== 'undefined' ? `${window.screen?.width || 0}x${window.screen?.height || 0}` : '0x0';
     const fp = `ncd-${rand}-${screenInfo}`;
     window.localStorage.setItem(storageKey, fp);
     return fp;
@@ -161,14 +170,68 @@ function getOrCreateDeviceFingerprint(): string {
   }
 }
 
+function detectCardBrand(digits: string): 'VISA' | 'MASTERCARD' | 'AMEX' | 'CARD' {
+  if (/^4/.test(digits)) return 'VISA';
+  if (/^(5[1-5]|2(2[2-9][1-9]|2[3-9]\d|[3-6]\d\d|7([01]\d|20)))/.test(digits)) return 'MASTERCARD';
+  if (/^3[47]/.test(digits)) return 'AMEX';
+  return 'CARD';
+}
+
+function isValidLuhn(digits: string): boolean {
+  if (!/^\d{13,19}$/.test(digits)) return false;
+  let sum = 0;
+  let doubleDigit = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let n = Number(digits[i]);
+    if (doubleDigit) {
+      n *= 2;
+      if (n > 9) n -= 9;
+    }
+    sum += n;
+    doubleDigit = !doubleDigit;
+  }
+  return sum % 10 === 0;
+}
+
+function formatCardNumber(raw: string): string {
+  const digits = raw.replace(/\D/g, '').slice(0, 19);
+  return digits.replace(/(\d{4})(?=\d)/g, '$1 ');
+}
+
+function formatCardExpiry(raw: string): string {
+  const digits = raw.replace(/\D/g, '').slice(0, 4);
+  if (digits.length <= 2) return digits;
+  return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+}
+
+function isValidFutureExpiry(mmYy: string): boolean {
+  const m = /^(\d{2})\/(\d{2})$/.exec(mmYy.trim());
+  if (!m) return false;
+  const month = Number(m[1]);
+  const year = 2000 + Number(m[2]);
+  if (month < 1 || month > 12) return false;
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+  return year > currentYear || (year === currentYear && month >= currentMonth);
+}
+
 export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onToggleLang }: Props) {
   const t = TRANSLATIONS[lang].portal;
   const [activeTab, setActiveTab] = useState<'buy' | 'connect' | 'account'>('buy');
+  const [tabDirection, setTabDirection] = useState<number>(0);
   const [operatingMode, setOperatingMode] = useState<'STANDALONE_MODE' | 'MIKROTIK_MODE'>('STANDALONE_MODE');
+
+  const switchTab = (next: 'buy' | 'connect' | 'account') => {
+    const order = ['buy', 'connect', 'account'] as const;
+    setTabDirection(order.indexOf(next) >= order.indexOf(activeTab) ? 1 : -1);
+    setActiveTab(next);
+  };
 
   const [businesses, setBusinesses] = useState<PortalBusiness[]>([]);
   const [selectedBusinessId, setSelectedBusinessId] = useState<string>('');
   const [packages, setPackages] = useState<PortalPackage[]>([]);
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('ALL');
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [loadingPkgs, setLoadingPkgs] = useState(true);
 
@@ -176,13 +239,17 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
   const [selectedPkgId, setSelectedPkgId] = useState<string>('');
   const [provider, setProvider] = useState<'MPESA' | 'AIRTEL_MONEY' | 'TIGO_PESA' | 'HALOPESA' | 'CARD'>('MPESA');
   const [phoneNumber, setPhoneNumber] = useState('');
+  const [cardHolder, setCardHolder] = useState('');
+  const [cardNumber, setCardNumber] = useState('');
+  const [cardExpiry, setCardExpiry] = useState('');
+  const [cardCvv, setCardCvv] = useState('');
   const [paying, setPaying] = useState(false);
   const [confirmingTest, setConfirmingTest] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [pendingPayment, setPendingPayment] = useState<PendingPayment | null>(null);
+  const [showRefLookup, setShowRefLookup] = useState(false);
   const [lookupRef, setLookupRef] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
-  const [heroImgFailed, setHeroImgFailed] = useState(false);
 
   // Use / Validate Token & Customer Session State
   const [voucherInput, setVoucherInput] = useState('');
@@ -195,6 +262,7 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
   const [validation, setValidation] = useState<VoucherValidation | null>(null);
   const [portalSession, setPortalSession] = useState<ActiveCustomerSession | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState(0);
+  const [showHardwareInfo, setShowHardwareInfo] = useState(false);
 
   // Account Lookup & Support Ticket State
   const [accountQuery, setAccountQuery] = useState('');
@@ -322,8 +390,25 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
     return () => window.clearInterval(timer);
   }, [pendingPayment?.reference, pendingPayment?.status, pendingPayment?.providerConfigured, lang]);
 
+  const availableCategories = useMemo(() => {
+    const cats = new Set<PortalPackage['category']>(packages.map((p) => p.category));
+    return (['HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY'] as const).filter((c) => cats.has(c));
+  }, [packages]);
+
+  const filteredPackages = useMemo(() => {
+    if (categoryFilter === 'ALL') return packages;
+    return packages.filter((p) => p.category === categoryFilter);
+  }, [packages, categoryFilter]);
+
+  useEffect(() => {
+    if (filteredPackages.length > 0 && !filteredPackages.some((p) => p.id === selectedPkgId)) {
+      setSelectedPkgId(filteredPackages[0].id);
+    }
+  }, [filteredPackages, selectedPkgId]);
+
   const handleWorkspaceChange = (bizId: string) => {
     setSelectedBusinessId(bizId);
+    setCategoryFilter('ALL');
     setPendingPayment(null);
     setPaymentError(null);
     void loadPortalCatalog(bizId);
@@ -332,6 +417,39 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
   const handleInitiatePayment = async (e: React.FormEvent) => {
     e.preventDefault();
     setPaymentError(null);
+
+    let cardSummary:
+      | { cardBrand: string; cardLast4: string; cardExpiry: string; cardHolder: string }
+      | undefined;
+
+    if (provider === 'CARD') {
+      const cleanHolder = cardHolder.trim();
+      const digits = cardNumber.replace(/\D/g, '');
+      const cleanCvv = cardCvv.replace(/\D/g, '');
+      if (cleanHolder.length < 2) {
+        setPaymentError(t.cardInvalidHolder);
+        return;
+      }
+      if (!isValidLuhn(digits)) {
+        setPaymentError(t.cardInvalidNumber);
+        return;
+      }
+      if (!isValidFutureExpiry(cardExpiry)) {
+        setPaymentError(t.cardInvalidExpiry);
+        return;
+      }
+      if (cleanCvv.length < 3 || cleanCvv.length > 4) {
+        setPaymentError(t.cardInvalidCvv);
+        return;
+      }
+      cardSummary = {
+        cardBrand: detectCardBrand(digits),
+        cardLast4: digits.slice(-4),
+        cardExpiry: cardExpiry.trim(),
+        cardHolder: cleanHolder,
+      };
+    }
+
     setPaying(true);
     try {
       const res = await apiRequest<{ payment: PendingPayment }>('/api/portal/payments/initiate', {
@@ -341,11 +459,16 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
           packageId: selectedPkgId,
           provider,
           phoneNumber,
+          ...(cardSummary ? { cardSummary } : {}),
         },
       });
       setPendingPayment(res.payment);
       setLookupRef(res.payment.reference);
       setCopiedCode(false);
+      if (provider === 'CARD') {
+        setCardNumber('');
+        setCardCvv('');
+      }
     } catch (err) {
       setPaymentError(err instanceof Error ? err.message : 'Unable to initiate payment');
     } finally {
@@ -561,165 +684,150 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
 
   const selectedPackage = packages.find((p) => p.id === selectedPkgId) || null;
   const currentBusiness = businesses.find((b) => b.id === selectedBusinessId) || null;
+  const isSessionActive = portalSession?.status === 'ACTIVE';
+
+  const catLabel = (cat: PortalPackage['category']) => {
+    if (cat === 'HOURLY') return t.catHourly;
+    if (cat === 'DAILY') return t.catDaily;
+    if (cat === 'WEEKLY') return t.catWeekly;
+    return t.catMonthly;
+  };
 
   return (
-    <div className="min-h-screen bg-stone-100 dark:bg-[#101010] text-[#101010] dark:text-[#FAFAFA] flex flex-col">
-      {/* Top Bar */}
-      <header className="sticky top-0 z-30 h-14 sm:h-16 px-3 sm:px-6 border-b border-stone-200 dark:border-zinc-800 bg-white/95 dark:bg-[#101010]/95 backdrop-blur-md flex items-center justify-between gap-2 sm:gap-4">
+    <div className="min-h-screen bg-[#F2F2F7] dark:bg-[#0B0B0D] text-[#111113] dark:text-[#F5F5F7] flex flex-col">
+      {/* Compact iOS Frosted Top Navigation Bar */}
+      <header className="sticky top-0 z-30 h-[52px] sm:h-16 px-4 sm:px-6 border-b ios-glass-bar flex items-center justify-between gap-4">
         <TraxLogo variant="compact" />
 
+        {/* Desktop iOS Segmented Tab Bar */}
+        <LayoutGroup id="portalDesktopNav">
+          <nav
+            aria-label="Customer sections"
+            className="hidden md:flex items-center p-1 rounded-2xl bg-black/[0.06] dark:bg-white/[0.08] border border-black/[0.05] dark:border-white/[0.06]"
+          >
+            {(['buy', 'connect', 'account'] as const).map((tabKey) => {
+              const label =
+                tabKey === 'buy' ? t.tabBuy : tabKey === 'connect' ? t.tabConnect : t.tabAccount;
+              const isActive = activeTab === tabKey;
+              return (
+                <button
+                  key={tabKey}
+                  type="button"
+                  onClick={() => switchTab(tabKey)}
+                  className={`relative px-4 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors duration-150 ${
+                    isActive
+                      ? 'text-[#111113] dark:text-[#FFD400]'
+                      : 'text-zinc-600 dark:text-zinc-400 hover:text-[#111113] dark:hover:text-white'
+                  }`}
+                >
+                  {isActive && (
+                    <motion.span
+                      layoutId="portalDesktopTabPill"
+                      transition={NATIVE_SPRING}
+                      className="absolute inset-0 rounded-xl bg-white dark:bg-[#232327] shadow-xs"
+                      aria-hidden="true"
+                    />
+                  )}
+                  <span className="relative z-10">{label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </LayoutGroup>
+
         <div className="flex items-center gap-2 shrink-0">
-          <span className="hidden md:inline-flex items-center gap-1.5 text-xs font-mono text-[#9A7B00] dark:text-[#FFD400] px-2.5 py-1 rounded-lg bg-[#FFD400]/12 border border-[#FFD400]/30">
-            <Ticket className="w-3.5 h-3.5" />
-            {operatingMode === 'STANDALONE_MODE' ? t.standaloneModeLabel : t.mikrotikModeLabel}
-          </span>
           <LanguageSwitcher lang={lang} onToggleLang={onToggleLang} />
           <button
             type="button"
             onClick={onToggleTheme}
             aria-label="Toggle Light or Dark Mode"
-            className="btn-secondary min-h-[38px] sm:min-h-[40px] px-2.5 sm:px-3 text-xs"
+            className="inline-flex items-center justify-center min-h-[40px] min-w-[40px] rounded-full bg-black/[0.05] dark:bg-white/[0.08] border border-black/[0.06] dark:border-white/[0.08] text-zinc-700 dark:text-zinc-200 hover:bg-black/[0.09] dark:hover:bg-white/[0.14] transition-all duration-150 active:scale-95 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFD400]/75"
           >
-            {theme === 'dark' ? (
-              <Sun className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
-            ) : (
-              <Moon className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
-            )}
-            <span className="hidden sm:inline">{theme === 'dark' ? t.light : t.dark}</span>
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-10 pb-8 sm:pb-12">
-        <div className="lg:hidden flex flex-col items-center text-center mb-4 px-2">
-          <div className="px-4 py-2.5 rounded-xl bg-[#161618] border border-zinc-800">
-            <TraxLogo variant="banner" />
-          </div>
-          <p className="text-[11px] font-mono tracking-wider text-[#B8860B] dark:text-[#FFD400] mt-2">
-            {t.mobileSub}
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-8 items-stretch">
-          {/* Branded Hero Column */}
-          <div className="order-2 lg:order-1 lg:col-span-5 flex flex-col justify-between bg-[#161618] text-white rounded-2xl overflow-hidden border border-zinc-800">
-            <div className="relative min-h-[210px] sm:min-h-[250px] p-5 flex flex-col justify-between overflow-hidden bg-[#101010]">
-              {!heroImgFailed ? (
-                <img
-                  src="/assets/aistudio/Illuminated_Network_Switch_with_Ethernet_Cables_Providing_Connectivity_for_Data_Transmission_fc6d8a5b.jpeg"
-                  alt="TRAX LINK high-speed wireless and Ethernet infrastructure"
-                  referrerPolicy="no-referrer"
-                  onError={() => setHeroImgFailed(true)}
-                  className="absolute inset-0 w-full h-full object-cover opacity-55"
-                />
-              ) : (
-                <div className="absolute inset-0 w-full h-full bg-gradient-to-br from-[#101010] via-[#161618] to-[#FFD400]/20 flex items-center justify-center">
-                  <Wifi className="w-14 h-14 text-[#FFD400]/70" />
+      {/* Main Content Workspace */}
+      <main className="flex-1 w-full max-w-6xl mx-auto px-3.5 sm:px-6 pt-4 sm:pt-7 pb-24 md:pb-12 space-y-5">
+        {/* Dynamic Connection / Greeting Card */}
+        {isSessionActive && portalSession ? (
+          <section className="ios-surface p-5 sm:p-6 bg-gradient-to-br from-[#141416] to-[#1D1D21] text-white border border-emerald-500/35">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-500/18 border border-emerald-400/35 flex items-center justify-center shrink-0">
+                  <Wifi className="w-6 h-6 text-emerald-400" />
                 </div>
-              )}
-              <div className="absolute inset-0 bg-gradient-to-t from-[#161618] via-[#101010]/70 to-[#101010]/45" />
-
-              <div className="relative z-10 hidden lg:flex justify-start">
-                <TraxLogo variant="banner" />
-              </div>
-
-              <div className="relative z-10 mt-auto pt-4">
-                <p className="text-xs font-mono tracking-wider text-[#FFD400]">
-                  {currentBusiness?.hotspotTitle || t.heroTag}
-                </p>
-                <h1 className="text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight text-white mt-1 text-balance">
-                  CONNECT. MANAGE. GROW.
-                </h1>
-              </div>
-            </div>
-
-            <div className="p-5 sm:p-6 space-y-5 flex-1 flex flex-col justify-between">
-              <div className="space-y-4">
-                <p className="text-sm text-zinc-300 leading-relaxed">{t.heroDesc}</p>
-                <div className="space-y-3 pt-2 border-t border-zinc-800 text-xs text-zinc-300">
-                  <div className="flex items-start gap-2.5">
-                    <Smartphone className="w-4 h-4 text-[#FFD400] shrink-0 mt-0.5" />
-                    <span>{t.heroPoint1}</span>
+                <div>
+                  <div className="flex items-center gap-2 text-xs font-medium text-emerald-400">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>{t.activeSessionTitle}</span>
                   </div>
-                  <div className="flex items-start gap-2.5">
-                    <ShieldCheck className="w-4 h-4 text-[#FFD400] shrink-0 mt-0.5" />
-                    <span>{t.heroPoint2}</span>
+                  <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white mt-0.5">
+                    {portalSession.packageName}
+                  </h1>
+                  <div className="text-xs text-zinc-300 mt-1 flex flex-wrap items-center gap-1.5 tabular-nums">
+                    <span className="font-mono">{portalSession.codeMasked}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{portalSession.deviceLabel || '1 Device'}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{formatSpeed(portalSession.downloadKbps)}</span>
                   </div>
                 </div>
-
-                {operatingMode === 'STANDALONE_MODE' && (
-                  <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 space-y-1">
-                    <div className="flex items-center gap-1.5 font-semibold text-amber-300">
-                      <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
-                      <span>{t.airtelNoticeTitle}</span>
-                    </div>
-                    <p className="text-[11px] leading-relaxed text-amber-100/85">{t.airtelNoticeBody}</p>
-                  </div>
-                )}
               </div>
 
-              <div className="pt-4 border-t border-zinc-800 flex items-center justify-between text-xs text-zinc-400">
-                <span>{t.heroFooter}</span>
+              <div className="flex items-center justify-between sm:justify-end gap-4 pt-3 sm:pt-0 border-t sm:border-t-0 border-white/10">
+                <div className="sm:text-right">
+                  <span className="text-[11px] text-zinc-400 block">{t.remainingTimeLabel}</span>
+                  <span className="font-mono font-bold text-2xl sm:text-3xl tracking-tight text-emerald-400 tabular-nums">
+                    {formatCountdown(remainingSeconds)}
+                  </span>
+                </div>
                 <button
                   type="button"
-                  onClick={onSwitchToAdmin}
-                  className="text-xs font-medium text-[#FFD400] hover:underline transition-colors cursor-pointer"
+                  disabled={disconnecting}
+                  onClick={handlePortalLogout}
+                  className="inline-flex items-center justify-center gap-1.5 min-h-[44px] px-4 rounded-2xl text-xs font-semibold bg-red-500/20 text-red-200 border border-red-400/35 hover:bg-red-500/30 active:scale-[0.98] transition-all cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  {t.staffLink}
+                  <LogOut className="w-4 h-4" />
+                  {disconnecting ? t.disconnectingBtn : t.disconnectBtn}
                 </button>
               </div>
             </div>
-          </div>
-
-          {/* Customer Interactive Portal Column */}
-          <div className="order-1 lg:order-2 lg:col-span-7 flex flex-col">
-            <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-2xl p-5 sm:p-7 space-y-5 flex-1 shadow-sm">
-              {/* Tabs + Currency */}
-              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-stone-200 dark:border-zinc-800">
-                <div className="btn-tab-group overflow-x-auto max-w-full">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('buy')}
-                    className={activeTab === 'buy' ? 'btn-tab-active' : 'btn-tab'}
-                  >
-                    <Ticket className="w-3.5 h-3.5 inline mr-1" />
-                    {t.tabBuy}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('connect')}
-                    className={activeTab === 'connect' ? 'btn-tab-active' : 'btn-tab'}
-                  >
-                    <KeyRound className="w-3.5 h-3.5 inline mr-1" />
-                    {t.tabConnect}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('account')}
-                    className={activeTab === 'account' ? 'btn-tab-active' : 'btn-tab'}
-                  >
-                    <LifeBuoy className="w-3.5 h-3.5 inline mr-1" />
-                    {t.tabAccount}
-                  </button>
-                </div>
-
-                <span className="text-xs font-mono font-semibold text-[#B8860B] dark:text-[#FFD400]">
-                  {currentBusiness?.currency || 'TZS'}
-                </span>
+          </section>
+        ) : (
+          <section className="ios-surface px-5 py-4 sm:px-7 sm:py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1 max-w-2xl">
+              <div className="flex items-center gap-2 text-xs font-medium text-[#9A7B00] dark:text-[#FFD400]">
+                <Wifi className="w-4 h-4 shrink-0" />
+                <span>{currentBusiness?.hotspotTitle || currentBusiness?.name || 'TRAX LINK WiFi'}</span>
               </div>
+              <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-balance">
+                {t.readyGreeting}
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">
+                {t.readySub}
+              </p>
+              <div className="pt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                <span>1. {t.step1Label}</span>
+                <span aria-hidden="true">·</span>
+                <span>2. {t.step2Label}</span>
+                <span aria-hidden="true">·</span>
+                <span>3. {t.step3Label}</span>
+              </div>
+            </div>
 
-              {/* Multi-Tenant Workspace Selector */}
-              {businesses.length > 1 && (
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-stone-100 dark:border-zinc-800/80 text-xs">
-                  <label className="flex items-center gap-1.5 font-medium text-zinc-600 dark:text-zinc-400">
-                    <Building2 className="w-3.5 h-3.5 text-[#B8860B] dark:text-[#FFD400]" />
-                    {t.workspaceLabel}
-                  </label>
+            {businesses.length > 1 && (
+              <div className="shrink-0 sm:min-w-[230px]">
+                <label className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                  {t.workspaceLabel}
+                </label>
+                <div className="relative">
+                  <Building2 className="w-4 h-4 text-[#9A7B00] dark:text-[#FFD400] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <select
                     value={selectedBusinessId}
                     onChange={(e) => handleWorkspaceChange(e.target.value)}
-                    className="px-3 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] font-medium"
+                    className="w-full min-h-[44px] pl-9 pr-8 py-2 rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20] text-xs font-semibold appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#FFD400]/75"
                   >
                     {businesses.map((b) => (
                       <option key={b.id} value={b.id}>
@@ -727,190 +835,362 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
                       </option>
                     ))}
                   </select>
+                  <ChevronDown className="w-4 h-4 text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        <AnimatePresence mode="wait" initial={false} custom={tabDirection}>
+          <MobilePageTransition key={activeTab} direction={tabDirection}>
+        {/* TAB 1: BUY WIFI VOUCHER */}
+        {activeTab === 'buy' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            {/* Plans Grid */}
+            <div className="lg:col-span-7 ios-surface p-4 sm:p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-bold tracking-tight">{t.buyTitle}</h2>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{t.buySubtitle}</p>
+                </div>
+
+                {availableCategories.length > 1 && (
+                  <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#F2F2F7] dark:bg-[#101012] border border-black/[0.05] dark:border-white/[0.06] overflow-x-auto max-w-full">
+                    <button
+                      type="button"
+                      onClick={() => setCategoryFilter('ALL')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-all ${
+                        categoryFilter === 'ALL'
+                          ? 'bg-white dark:bg-[#242428] text-[#111113] dark:text-[#FFD400] shadow-xs'
+                          : 'text-zinc-600 dark:text-zinc-400 hover:text-[#111113] dark:hover:text-white'
+                      }`}
+                    >
+                      {t.catAll}
+                    </button>
+                    {availableCategories.map((cat) => (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setCategoryFilter(cat)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-all ${
+                          categoryFilter === cat
+                            ? 'bg-white dark:bg-[#242428] text-[#111113] dark:text-[#FFD400] shadow-xs'
+                            : 'text-zinc-600 dark:text-zinc-400 hover:text-[#111113] dark:hover:text-white'
+                        }`}
+                      >
+                        {catLabel(cat)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {loadingPkgs ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="h-28 rounded-3xl bg-[#F2F2F7] dark:bg-[#1D1D20] animate-pulse" />
+                  <div className="h-28 rounded-3xl bg-[#F2F2F7] dark:bg-[#1D1D20] animate-pulse" />
+                  <div className="h-28 rounded-3xl bg-[#F2F2F7] dark:bg-[#1D1D20] animate-pulse" />
+                  <div className="h-28 rounded-3xl bg-[#F2F2F7] dark:bg-[#1D1D20] animate-pulse" />
+                </div>
+              ) : filteredPackages.length === 0 ? (
+                <div className="p-8 rounded-3xl border border-dashed border-black/15 dark:border-white/15 text-center text-sm text-zinc-500 dark:text-zinc-400">
+                  {t.noPackages}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {filteredPackages.map((pkg) => {
+                    const selected = pkg.id === selectedPkgId;
+                    return (
+                      <button
+                        key={pkg.id}
+                        type="button"
+                        onClick={() => setSelectedPkgId(pkg.id)}
+                        className={`group relative text-left p-4 sm:p-5 rounded-3xl border transition-all duration-150 ios-spring cursor-pointer active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFD400]/80 ${
+                          selected
+                            ? 'bg-[#FFD400]/14 dark:bg-[#FFD400]/12 border-[#FFD400] ring-1 ring-[#FFD400]/55 shadow-sm'
+                            : 'ios-grouped-cell hover:bg-[#ECECF0] dark:hover:bg-[#232327]'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 block">
+                              {catLabel(pkg.category)}
+                            </span>
+                            <span className="font-bold text-base tracking-tight block truncate mt-0.5">
+                              {pkg.name}
+                            </span>
+                          </div>
+
+                          <div
+                            className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 transition-colors ${
+                              selected
+                                ? 'bg-[#FFD400] text-[#111113]'
+                                : 'bg-black/[0.06] dark:bg-white/[0.08] text-transparent'
+                            }`}
+                          >
+                            <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                          </div>
+                        </div>
+
+                        <div className="mt-4 flex items-baseline justify-between gap-2">
+                          <span className="font-mono font-extrabold text-xl tabular-nums text-[#9A7B00] dark:text-[#FFD400]">
+                            {formatTzs(pkg.priceTzs)}
+                          </span>
+                          <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300 tabular-nums">
+                            {formatDurationLocalized(pkg.durationMinutes, lang)}
+                          </span>
+                        </div>
+
+                        <div className="mt-2 pt-2.5 border-t border-black/[0.06] dark:border-white/[0.07] text-xs text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5 tabular-nums">
+                          <span>{formatSpeed(pkg.downloadKbps)}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{pkg.dataLimitMb ? `${pkg.dataLimitMb} MB` : t.unlimited}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
+            </div>
 
-              {activeTab === 'buy' ? (
-                <>
-                  <div>
-                    <h2 className="text-lg sm:text-xl font-semibold">{t.buyTitle}</h2>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.buySubtitle}</p>
+            {/* Checkout Sheet & Instant Voucher Pass */}
+            <div className="lg:col-span-5 space-y-4 lg:sticky lg:top-20">
+              {selectedPackage && (
+                <section className="ios-surface p-4 sm:p-6 space-y-4">
+                  <div className="ios-grouped-cell p-3.5 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400 block">
+                        {t.selectedPlanLabel}
+                      </span>
+                      <span className="font-bold text-sm truncate block">{selectedPackage.name}</span>
+                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums">
+                        {formatDurationLocalized(selectedPackage.durationMinutes, lang)} ·{' '}
+                        {formatSpeed(selectedPackage.downloadKbps)}
+                      </span>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <span className="font-mono font-extrabold text-lg tabular-nums text-[#9A7B00] dark:text-[#FFD400]">
+                        {formatTzs(selectedPackage.priceTzs)}
+                      </span>
+                    </div>
                   </div>
 
-                  {loadingPkgs ? (
-                    <div className="space-y-3">
-                      <div className="h-20 rounded-xl bg-stone-100 dark:bg-[#101010] animate-pulse" />
-                      <div className="h-20 rounded-xl bg-stone-100 dark:bg-[#101010] animate-pulse" />
-                    </div>
-                  ) : packages.length === 0 ? (
-                    <div className="p-6 rounded-xl border border-dashed border-stone-300 dark:border-zinc-700 text-center text-sm text-zinc-500 dark:text-zinc-400">
-                      {t.noPackages}
-                    </div>
-                  ) : (
-                    <>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {packages.map((pkg) => {
-                          const selected = pkg.id === selectedPkgId;
+                  <form onSubmit={handleInitiatePayment} className="space-y-4">
+                    <div>
+                      <span className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-2">
+                        {t.paymentMethodLabel}
+                      </span>
+                      <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-3 gap-2">
+                        {(['MPESA', 'AIRTEL_MONEY', 'TIGO_PESA', 'HALOPESA', 'CARD'] as const).map((p) => {
+                          const info = providers.find((x) => x.provider === p);
+                          const brand = PAYMENT_PROVIDER_BRANDS[p];
+                          const active = provider === p;
                           return (
                             <button
-                              key={pkg.id}
+                              key={p}
                               type="button"
-                              onClick={() => setSelectedPkgId(pkg.id)}
-                              className={`text-left p-4 rounded-xl border transition-all duration-150 cursor-pointer active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFD400]/75 ${
-                                selected
-                                  ? 'border-[#FFD400] bg-[#FFD400]/12 ring-1 ring-[#FFD400]/45 shadow-xs'
-                                  : 'border-stone-200 dark:border-zinc-800 bg-stone-50 dark:bg-[#101010] hover:border-stone-300 dark:hover:border-zinc-700'
+                              onClick={() => {
+                                setProvider(p);
+                                setPaymentError(null);
+                              }}
+                              className={`relative min-h-[78px] px-2 py-2 rounded-2xl border text-xs font-medium flex flex-col items-center justify-center gap-1.5 text-center transition-all duration-150 ios-spring cursor-pointer active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFD400]/80 ${
+                                active
+                                  ? 'border-[#FFD400] bg-[#FFD400]/15 text-[#111113] dark:text-white ring-1 ring-[#FFD400]/45 shadow-xs'
+                                  : 'ios-grouped-cell text-zinc-600 dark:text-zinc-400 hover:bg-[#ECECF0] dark:hover:bg-[#232327]'
                               }`}
                             >
-                              <div className="flex items-baseline justify-between gap-2">
-                                <span className="font-semibold text-sm">{pkg.name}</span>
-                                <span className="font-mono font-bold text-sm tabular-nums text-[#9A7B00] dark:text-[#FFD400]">
-                                  {formatTzs(pkg.priceTzs)}
+                              {brand.logoUrl ? (
+                                <span className="w-9 h-8 rounded-lg overflow-hidden flex items-center justify-center shrink-0">
+                                  <img
+                                    src={brand.logoUrl}
+                                    alt={brand.alt}
+                                    className="w-full h-full object-contain"
+                                  />
                                 </span>
-                              </div>
-                              <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 flex flex-wrap items-center gap-1.5 tabular-nums">
-                                <span>{formatDurationLocalized(pkg.durationMinutes, lang)}</span>
-                                <span>·</span>
-                                <span>{formatSpeed(pkg.downloadKbps)}</span>
-                                <span>·</span>
-                                <span>{pkg.dataLimitMb ? `${pkg.dataLimitMb} MB` : t.unlimited}</span>
+                              ) : (
+                                <span className="w-9 h-8 rounded-lg flex items-center justify-center text-[#9A7B00] dark:text-[#FFD400]">
+                                  <CreditCard className="w-5 h-5" />
+                                </span>
+                              )}
+                              <div className="leading-tight">
+                                <div className="font-semibold text-[11px] whitespace-nowrap">
+                                  {t.providerLabels[p]}
+                                </div>
+                                <div className="text-[10px] opacity-70 truncate max-w-[84px]">
+                                  {info?.configured ? t.active : t.integrationReady}
+                                </div>
                               </div>
                             </button>
                           );
                         })}
                       </div>
-
-                      {selectedPackage && (
-                        <form onSubmit={handleInitiatePayment} className="space-y-4 pt-3 border-t border-stone-200 dark:border-zinc-800">
-                          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                            {(['MPESA', 'AIRTEL_MONEY', 'TIGO_PESA', 'HALOPESA', 'CARD'] as const).map((p) => {
-                              const info = providers.find((x) => x.provider === p);
-                              const brand = PAYMENT_PROVIDER_BRANDS[p];
-                              const active = provider === p;
-                              return (
-                                <button
-                                  key={p}
-                                  type="button"
-                                  onClick={() => setProvider(p)}
-                                  className={`relative min-h-[82px] px-2 py-2 rounded-xl border text-xs font-medium flex flex-col items-center justify-center gap-1.5 text-center transition-all duration-150 cursor-pointer active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFD400]/75 ${
-                                    active
-                                      ? 'border-[#FFD400] bg-[#FFD400]/15 text-[#101010] dark:text-white ring-1 ring-[#FFD400]/40 shadow-xs'
-                                      : 'border-stone-200 dark:border-zinc-800 bg-stone-50 dark:bg-[#101010] text-zinc-600 dark:text-zinc-400 hover:border-stone-300 dark:hover:border-zinc-700'
-                                  }`}
-                                >
-                                  {active && (
-                                    <Check className="w-3.5 h-3.5 text-[#9A7B00] dark:text-[#FFD400] absolute top-1.5 right-1.5" />
-                                  )}
-                                  {brand.logoUrl ? (
-                                    <span className="w-10 h-9 rounded-lg bg-transparent overflow-hidden flex items-center justify-center shrink-0">
-                                      <img
-                                        src={brand.logoUrl}
-                                        alt={brand.alt}
-                                        className="w-full h-full object-contain"
-                                      />
-                                    </span>
-                                  ) : (
-                                    <span className="w-10 h-9 rounded-lg flex items-center justify-center text-[#9A7B00] dark:text-[#FFD400]">
-                                      <CreditCard className="w-6 h-6" />
-                                    </span>
-                                  )}
-                                  <div className="leading-tight">
-                                    <div className="font-semibold text-[11px]">{t.providerLabels[p]}</div>
-                                    <div className="text-[10px] opacity-75">
-                                      {info?.configured ? t.active : t.integrationReady}
-                                    </div>
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-
-                          <div>
-                            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
-                              {t.phoneLabel}
-                            </label>
-                            <div className="relative">
-                              <Phone className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                              <input
-                                type="tel"
-                                required
-                                value={phoneNumber}
-                                onChange={(e) => setPhoneNumber(e.target.value)}
-                                placeholder="0754 123 456"
-                                className="w-full min-h-[48px] pl-10 pr-4 py-2 text-sm font-mono rounded-xl border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
-                              />
-                            </div>
-                          </div>
-
-                          {paymentError && (
-                            <div className="p-3 rounded-xl border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300">
-                              {paymentError}
-                            </div>
-                          )}
-
-                          <button
-                            type="submit"
-                            disabled={paying}
-                            className="btn-primary w-full min-h-[48px] text-sm"
-                          >
-                            <Ticket className="w-4 h-4" />
-                            {paying ? t.initiating : t.buyButton(formatTzs(selectedPackage.priceTzs))}
-                          </button>
-                        </form>
-                      )}
-                    </>
-                  )}
-
-                  {/* Payment Reference Verification & Issued Voucher Token */}
-                  <div className="pt-4 border-t border-stone-200 dark:border-zinc-800 space-y-3">
-                    <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{t.verifyTitle}</p>
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <input
-                        type="text"
-                        value={lookupRef}
-                        onChange={(e) => setLookupRef(e.target.value)}
-                        placeholder="TRX-PAY-..."
-                        className="flex-1 min-h-[44px] px-3 py-2 text-xs font-mono rounded-xl border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010]"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleCheckPaymentStatus()}
-                        className="btn-secondary min-h-[44px] text-xs w-full sm:w-auto"
-                      >
-                        {t.checkStatus}
-                      </button>
                     </div>
 
-                    {pendingPayment && (
-                      <div className="p-4 rounded-xl bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-zinc-800 text-xs space-y-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2 font-mono">
-                          <span className="font-semibold truncate">{pendingPayment.reference}</span>
-                          <div className="flex items-center gap-2">
-                            {pendingPayment.isTest && (
-                              <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">
-                                {t.testTokenBadge}
-                              </span>
-                            )}
-                            <span
-                              className={
-                                pendingPayment.status === 'COMPLETED'
-                                  ? 'text-emerald-600 dark:text-emerald-400 font-semibold shrink-0'
-                                  : 'text-amber-600 dark:text-amber-400 font-semibold shrink-0'
-                              }
-                            >
-                              {pendingPayment.status}
-                            </span>
+                    <AnimatePresence initial={false}>
+                      {provider === 'CARD' && (
+                        <motion.div
+                          key="bank-card-panel"
+                          initial={{ opacity: 0, y: 12, scale: 0.985 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: -8, scale: 0.985 }}
+                          transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                          className="ios-grouped-cell p-3.5 sm:p-4 space-y-3"
+                        >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#111113] dark:text-white">
+                            <Lock className="w-3.5 h-3.5 text-[#9A7B00] dark:text-[#FFD400]" />
+                            {t.cardDetailsTitle}
+                          </span>
+                          <span className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {(() => {
+                              const detected = detectCardBrand(cardNumber.replace(/\D/g, ''));
+                              if (detected === 'VISA') return 'Visa';
+                              if (detected === 'MASTERCARD') return 'Mastercard';
+                              if (detected === 'AMEX') return 'AMEX';
+                              return 'Visa · Mastercard';
+                            })()}
+                          </span>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-medium text-zinc-600 dark:text-zinc-300 mb-1">
+                            {t.cardHolderLabel}
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            autoComplete="cc-name"
+                            value={cardHolder}
+                            onChange={(e) => setCardHolder(e.target.value)}
+                            placeholder={t.cardHolderPlaceholder}
+                            className="w-full min-h-[46px] px-3.5 py-2 text-sm rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-white dark:bg-[#161618] text-[#111113] dark:text-white uppercase placeholder:normal-case focus:outline-none focus:ring-2 focus:ring-[#FFD400]/70"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-medium text-zinc-600 dark:text-zinc-300 mb-1">
+                            {t.cardNumberLabel}
+                          </label>
+                          <div className="relative">
+                            <CreditCard className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              required
+                              autoComplete="cc-number"
+                              maxLength={23}
+                              value={cardNumber}
+                              onChange={(e) => setCardNumber(formatCardNumber(e.target.value))}
+                              placeholder={t.cardNumberPlaceholder}
+                              className="w-full min-h-[48px] pl-10 pr-4 py-2 text-sm font-mono tabular-nums rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-white dark:bg-[#161618] text-[#111113] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FFD400]/70"
+                            />
                           </div>
                         </div>
 
-                        <p className="text-zinc-600 dark:text-zinc-400">{pendingPayment.message}</p>
+                        <div className="grid grid-cols-2 gap-2.5">
+                          <div>
+                            <label className="block text-[11px] font-medium text-zinc-600 dark:text-zinc-300 mb-1">
+                              {t.cardExpiryLabel}
+                            </label>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              required
+                              autoComplete="cc-exp"
+                              maxLength={5}
+                              value={cardExpiry}
+                              onChange={(e) => setCardExpiry(formatCardExpiry(e.target.value))}
+                              placeholder={t.cardExpiryPlaceholder}
+                              className="w-full min-h-[46px] px-3.5 py-2 text-sm font-mono tabular-nums rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-white dark:bg-[#161618] text-[#111113] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FFD400]/70"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-medium text-zinc-600 dark:text-zinc-300 mb-1">
+                              {t.cardCvvLabel}
+                            </label>
+                            <input
+                              type="password"
+                              inputMode="numeric"
+                              required
+                              autoComplete="cc-csc"
+                              maxLength={4}
+                              value={cardCvv}
+                              onChange={(e) => setCardCvv(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                              placeholder={t.cardCvvPlaceholder}
+                              className="w-full min-h-[46px] px-3.5 py-2 text-sm font-mono tabular-nums rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-white dark:bg-[#161618] text-[#111113] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FFD400]/70"
+                            />
+                          </div>
+                        </div>
+
+                        <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                          {t.cardSecurityNote}
+                        </p>
+                      </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
+                        {provider === 'CARD' ? t.cardReceiptPhoneLabel : t.phoneLabel}
+                      </label>
+                      <div className="relative">
+                        <Phone className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="tel"
+                          required
+                          value={phoneNumber}
+                          onChange={(e) => setPhoneNumber(e.target.value)}
+                          placeholder="0754 123 456"
+                          className="w-full min-h-[48px] pl-10 pr-4 py-2 text-sm font-mono rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20] text-[#111113] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FFD400]/70"
+                        />
+                      </div>
+                    </div>
+
+                    {paymentError && (
+                      <div className="p-3 rounded-2xl border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/35 text-xs text-red-700 dark:text-red-300 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{paymentError}</span>
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={paying}
+                      className="btn-primary w-full min-h-[50px] rounded-2xl text-sm font-bold"
+                    >
+                      <Ticket className="w-4 h-4" />
+                      {paying ? t.initiating : t.buyButton(formatTzs(selectedPackage.priceTzs))}
+                    </button>
+                  </form>
+
+                  {/* Pending / Issued Apple-Wallet Style Pass */}
+                  {pendingPayment && (
+                    <div className="pt-4 border-t border-black/[0.07] dark:border-white/[0.08] space-y-3">
+                      <div className="ios-grouped-cell p-4 space-y-3 text-xs">
+                        <div className="flex items-center justify-between gap-2 font-mono">
+                          <span className="font-semibold truncate">{pendingPayment.reference}</span>
+                          <span
+                            className={`font-semibold shrink-0 ${
+                              pendingPayment.status === 'COMPLETED'
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : 'text-amber-600 dark:text-amber-400'
+                            }`}
+                          >
+                            {pendingPayment.status}
+                          </span>
+                        </div>
+
+                        <p className="text-zinc-600 dark:text-zinc-400 leading-relaxed">
+                          {pendingPayment.message}
+                        </p>
 
                         {pendingPayment.status === 'PENDING' && !pendingPayment.providerConfigured && (
                           <button
                             type="button"
                             disabled={confirmingTest}
                             onClick={() => handleConfirmStandalonePayment(pendingPayment.reference)}
-                            className="btn-primary w-full min-h-[44px] text-xs"
+                            className="btn-primary w-full min-h-[46px] rounded-2xl text-xs"
                           >
                             <CheckCircle2 className="w-4 h-4" />
                             {confirmingTest ? t.confirmingTestBtn : t.confirmTestBtn}
@@ -918,372 +1198,456 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
                         )}
 
                         {pendingPayment.status === 'PENDING' && pendingPayment.providerConfigured && (
-                          <p className="text-[11px] font-mono text-[#B8860B] dark:text-[#FFD400]">
+                          <p className="text-[11px] font-mono text-[#9A7B00] dark:text-[#FFD400]">
                             {t.awaitingWebhookHint}
                           </p>
                         )}
 
                         {pendingPayment.voucherCode && (
-                          <div className="pt-3 border-t border-stone-200 dark:border-zinc-800 space-y-3">
-                            <div className="p-3.5 rounded-xl bg-white dark:bg-[#161618] border border-[#FFD400]/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                              <div>
-                                <div className="flex items-center gap-2 mb-0.5 text-[10px] font-mono text-zinc-500">
-                                  <span>{pendingPayment.isTest ? t.testTokenBadge : t.liveTokenBadge}</span>
-                                  {pendingPayment.receiptNumber && (
-                                    <span>· {t.receiptLabel} {pendingPayment.receiptNumber}</span>
-                                  )}
-                                </div>
-                                <div className="text-[11px] text-zinc-500">{t.issuedVoucher}</div>
-                                <div className="font-mono font-bold text-lg tracking-wider text-[#9A7B00] dark:text-[#FFD400] mt-0.5 select-all">
-                                  {pendingPayment.voucherCode}
-                                </div>
+                          <div className="p-4 rounded-2xl bg-[#111113] text-white border border-[#FFD400]/50 space-y-3">
+                            <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-zinc-400">
+                              <span>
+                                {pendingPayment.isTest ? t.testTokenBadge : t.liveTokenBadge}
+                              </span>
+                              {pendingPayment.receiptNumber && (
+                                <span>
+                                  {t.receiptLabel} {pendingPayment.receiptNumber}
+                                </span>
+                              )}
+                            </div>
+
+                            <div>
+                              <span className="text-[11px] text-zinc-400 block">{t.issuedVoucher}</span>
+                              <div className="font-mono font-extrabold text-xl tracking-wider text-[#FFD400] mt-0.5 select-all tabular-nums">
+                                {pendingPayment.voucherCode}
                               </div>
-                              <div className="flex flex-wrap sm:flex-nowrap gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => handleCopyVoucher(pendingPayment.voucherCode!)}
-                                  className="btn-secondary min-h-[38px] px-3 py-1.5 text-xs rounded-lg flex-1 sm:flex-initial"
-                                >
-                                  {copiedCode ? (
-                                    <>
-                                      <Check className="w-3.5 h-3.5" />
-                                      {t.copied}
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-3.5 h-3.5" />
-                                      {t.copyCode}
-                                    </>
-                                  )}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleActivateTokenDirectly(pendingPayment.voucherCode!)}
-                                  className="btn-primary min-h-[38px] px-3.5 py-1.5 text-xs rounded-lg flex-1 sm:flex-initial"
-                                >
-                                  <KeyRound className="w-3.5 h-3.5" />
-                                  {t.activateNowBtn}
-                                </button>
-                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleCopyVoucher(pendingPayment.voucherCode!)}
+                                className="inline-flex items-center justify-center gap-1.5 min-h-[42px] px-3 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/15 text-white cursor-pointer active:scale-[0.98] transition-all"
+                              >
+                                {copiedCode ? (
+                                  <>
+                                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                    {t.copied}
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3.5 h-3.5" />
+                                    {t.copyCode}
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleActivateTokenDirectly(pendingPayment.voucherCode!)}
+                                className="btn-primary min-h-[42px] px-3 rounded-xl text-xs"
+                              >
+                                <KeyRound className="w-3.5 h-3.5" />
+                                {t.activateNowBtn}
+                              </button>
                             </div>
                           </div>
                         )}
                       </div>
-                    )}
-                  </div>
-                </>
-              ) : activeTab === 'connect' ? (
-                /* TAB 2: Use / Check Voucher Token + Customer Portal Session Tracker */
-                <div className="space-y-5">
-                  <div>
-                    <h2 className="text-lg sm:text-xl font-semibold">{t.connectTitle}</h2>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.connectSubtitle}</p>
-                  </div>
-
-                  {portalSession && portalSession.status === 'ACTIVE' && (
-                    <div className="p-4 sm:p-5 rounded-xl bg-emerald-500/10 border border-emerald-500/35 space-y-4">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                          <div>
-                            <h3 className="text-sm font-bold text-emerald-700 dark:text-emerald-300">
-                              {t.activeSessionTitle}
-                            </h3>
-                            <p className="text-xs font-mono text-zinc-600 dark:text-zinc-300">
-                              {portalSession.codeMasked} · {portalSession.packageName}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400 block">
-                            {t.remainingTimeLabel}
-                          </span>
-                          <span className="font-mono font-bold text-lg text-emerald-600 dark:text-emerald-400 tabular-nums inline-flex items-center gap-1.5">
-                            <Clock className="w-4 h-4" />
-                            {formatCountdown(remainingSeconds)}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-emerald-500/20 text-xs">
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.sessionStatusLabel}</span>
-                          <span className="font-mono font-semibold text-emerald-600 dark:text-emerald-400">
-                            {portalSession.status}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.speedLabel}</span>
-                          <span className="font-mono font-semibold">
-                            {formatSpeed(portalSession.downloadKbps)}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.authorizedDeviceLabel}</span>
-                          <span className="font-mono font-semibold truncate block">
-                            {portalSession.deviceLabel || 'Device #1'}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.expiresAtLabel}</span>
-                          <span className="font-mono text-[11px]">
-                            {new Date(portalSession.expiresAt).toLocaleTimeString()}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex justify-end">
-                        <button
-                          type="button"
-                          disabled={disconnecting}
-                          onClick={handlePortalLogout}
-                          className="btn-secondary text-xs min-h-[40px]"
-                        >
-                          <LogOut className="w-3.5 h-3.5" />
-                          {disconnecting ? t.disconnectingBtn : t.disconnectBtn}
-                        </button>
-                      </div>
                     </div>
                   )}
 
-                  <div className="space-y-3.5">
-                    <div>
-                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
-                        {t.tokenInputLabel}
-                      </label>
-                      <input
-                        type="text"
-                        value={voucherInput}
-                        onChange={(e) => setVoucherInput(e.target.value.toUpperCase())}
-                        placeholder={t.tokenInputPlaceholder}
-                        className="w-full min-h-[48px] px-4 py-2 text-sm font-mono uppercase tracking-wider rounded-xl border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
+                  {/* Collapsible Payment Reference Check */}
+                  <div className="pt-2 border-t border-black/[0.06] dark:border-white/[0.07]">
+                    <button
+                      type="button"
+                      onClick={() => setShowRefLookup((prev) => !prev)}
+                      className="w-full min-h-[40px] flex items-center justify-between text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-[#111113] dark:hover:text-white cursor-pointer"
+                    >
+                      <span>{t.verifyTitle}</span>
+                      <ChevronRight
+                        className={`w-4 h-4 transition-transform duration-150 ${showRefLookup ? 'rotate-90' : ''}`}
                       />
-                    </div>
+                    </button>
 
-                    <div>
-                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
-                        {t.deviceLabelInput} <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        minLength={2}
-                        maxLength={120}
-                        value={deviceLabel}
-                        onChange={(e) => setDeviceLabel(e.target.value)}
-                        placeholder={t.deviceLabelPlaceholder}
-                        className="w-full min-h-[44px] px-4 py-2 text-xs rounded-xl border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] text-[#101010] dark:text-white focus:outline-none focus:border-[#FFD400]"
-                      />
-                    </div>
-
-                    {tokenError && (
-                      <div className="p-3 rounded-xl border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300 flex items-start gap-2">
-                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                        <span>{tokenError}</span>
-                      </div>
-                    )}
-
-                    {tokenNotice && (
-                      <div className="p-3 rounded-xl border border-[#FFD400]/40 bg-[#FFD400]/10 text-xs text-[#9A7B00] dark:text-[#FFD400]">
-                        {tokenNotice}
-                      </div>
-                    )}
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      <button
-                        type="button"
-                        disabled={validating || !voucherInput.trim()}
-                        onClick={() => handleValidateVoucher()}
-                        className="btn-secondary min-h-[46px] text-xs w-full"
-                      >
-                        <ShieldCheck className="w-4 h-4" />
-                        {validating ? t.validatingBtn : t.validateBtn}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={activating || !voucherInput.trim()}
-                        onClick={() => handleRedeemVoucher()}
-                        className="btn-primary min-h-[46px] text-xs w-full"
-                      >
-                        <Wifi className="w-4 h-4" />
-                        {activating ? t.activatingBtn : t.activateBtn}
-                      </button>
-                    </div>
-                  </div>
-
-                  {validation && (
-                    <div className="p-4 rounded-xl bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-zinc-800 space-y-3 text-xs">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="font-mono font-bold text-sm">{validation.codeMasked}</span>
-                        <span
-                          className={`font-mono font-semibold ${
-                            validation.valid ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'
-                          }`}
-                        >
-                          {validation.valid ? t.validBadge : `${t.invalidBadge} (${validation.status})`}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-2 border-t border-stone-200 dark:border-zinc-800">
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.packageLabel}</span>
-                          <span className="font-semibold">{validation.packageName}</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.priceLabel}</span>
-                          <span className="font-mono font-semibold">{formatTzs(validation.priceTzs)}</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.durationLabel}</span>
-                          <span className="font-semibold">{formatDurationLocalized(validation.durationMinutes, lang)}</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.speedLabel}</span>
-                          <span className="font-mono">{formatSpeed(validation.downloadKbps)}</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.dataCapLabel}</span>
-                          <span className="font-mono">
-                            {validation.dataLimitMb ? `${validation.dataLimitMb} MB` : t.unlimited}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 dark:text-zinc-400 block">{t.deviceLockLabel}</span>
-                          <span className="font-mono font-semibold">
-                            {validation.boundDeviceName
-                              ? validation.boundDeviceName
-                              : validation.isBoundToDevice
-                              ? t.boundDeviceYes
-                              : t.boundDeviceNo}
-                          </span>
-                        </div>
-                      </div>
-
-                      {validation.revokedReason && (
-                        <p className="text-red-600 dark:text-red-400 font-mono text-[11px]">
-                          {validation.revokedReason}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                /* TAB 3: Customer Self-Service Account Lookup & Support Ticket */
-                <div className="space-y-6">
-                  {accountError && (
-                    <div className="p-3 rounded-xl border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300">
-                      {accountError}
-                    </div>
-                  )}
-
-                  <div className="space-y-3">
-                    <div>
-                      <h2 className="text-lg font-semibold">{t.accountLookupTitle}</h2>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.accountLookupSubtitle}</p>
-                    </div>
-                    <form onSubmit={handleLookupAccount} className="flex flex-col sm:flex-row gap-2">
-                      <div className="relative flex-1">
-                        <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    {showRefLookup && (
+                      <div className="mt-2.5 flex flex-col sm:flex-row gap-2">
                         <input
                           type="text"
-                          required
-                          value={accountQuery}
-                          onChange={(e) => setAccountQuery(e.target.value)}
-                          placeholder={t.lookupPhonePlaceholder}
-                          className="w-full min-h-[44px] pl-9 pr-3 py-2 text-xs font-mono rounded-xl border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010]"
+                          value={lookupRef}
+                          onChange={(e) => setLookupRef(e.target.value)}
+                          placeholder="TRX-PAY-..."
+                          className="flex-1 min-h-[44px] px-3.5 py-2 text-xs font-mono rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20]"
                         />
-                      </div>
-                      <button type="submit" disabled={searchingAccount} className="btn-primary min-h-[44px] text-xs">
-                        {t.lookupBtn}
-                      </button>
-                    </form>
-
-                    {purchases.length > 0 && (
-                      <div className="divide-y divide-stone-100 dark:divide-zinc-800 border border-stone-200 dark:border-zinc-800 rounded-xl bg-stone-50 dark:bg-[#101010]">
-                        {purchases.map((p) => (
-                          <div key={p.reference} className="p-3.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-                            <div>
-                              <div className="font-semibold">
-                                {p.packageName} · {p.businessName}
-                              </div>
-                              <div className="font-mono text-zinc-500 text-[11px]">
-                                {p.reference} · {p.status} · {formatTzs(p.amountTzs)}
-                              </div>
-                            </div>
-                            {p.voucherCode ? (
-                              <button
-                                type="button"
-                                onClick={() => handleActivateTokenDirectly(p.voucherCode!)}
-                                className="btn-chip-accent font-mono"
-                              >
-                                {p.voucherCode} · Use
-                              </button>
-                            ) : (
-                              <span className="font-mono text-zinc-500">{p.voucherMasked || '—'}</span>
-                            )}
-                          </div>
-                        ))}
+                        <button
+                          type="button"
+                          onClick={() => handleCheckPaymentStatus()}
+                          className="btn-secondary min-h-[44px] rounded-2xl text-xs"
+                        >
+                          {t.checkStatus}
+                        </button>
                       </div>
                     )}
                   </div>
-
-                  <div className="pt-5 border-t border-stone-200 dark:border-zinc-800 space-y-3">
-                    <div>
-                      <h3 className="text-base font-semibold">{t.supportTitle}</h3>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.supportSubtitle}</p>
-                    </div>
-                    {supportNotice && (
-                      <div className="p-3 rounded-xl border border-emerald-300 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/30 text-xs text-emerald-700 dark:text-emerald-300">
-                        {supportNotice}
-                      </div>
-                    )}
-                    <form onSubmit={handleSubmitSupport} className="space-y-3 text-xs">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        <div>
-                          <label className="block font-medium mb-1">{t.phoneLabel}</label>
-                          <input
-                            type="tel"
-                            required
-                            value={supportPhone}
-                            onChange={(e) => setSupportPhone(e.target.value)}
-                            placeholder="0754 123 456"
-                            className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010] font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block font-medium mb-1">{t.supportSubjectLabel}</label>
-                          <input
-                            type="text"
-                            required
-                            value={supportSubject}
-                            onChange={(e) => setSupportSubject(e.target.value)}
-                            placeholder="Voucher / Connection help"
-                            className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010]"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block font-medium mb-1">{t.supportMessageLabel}</label>
-                        <textarea
-                          rows={2}
-                          required
-                          value={supportMessage}
-                          onChange={(e) => setSupportMessage(e.target.value)}
-                          placeholder="Describe your issue or payment reference..."
-                          className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-[#101010]"
-                        />
-                      </div>
-                      <button type="submit" disabled={sendingSupport} className="btn-secondary text-xs">
-                        {t.supportSubmitBtn}
-                      </button>
-                    </form>
-                  </div>
-                </div>
+                </section>
               )}
             </div>
           </div>
-        </div>
+        )}
+
+        {/* TAB 2: REDEEM & VALIDATE VOUCHER TOKEN */}
+        {activeTab === 'connect' && (
+          <section className="max-w-2xl mx-auto ios-surface p-5 sm:p-7 space-y-5">
+            <div>
+              <h2 className="text-xl font-bold tracking-tight">{t.connectTitle}</h2>
+              <p className="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400 mt-1 leading-relaxed">
+                {t.connectSubtitle}
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
+                  {t.tokenInputLabel}
+                </label>
+                <input
+                  type="text"
+                  value={voucherInput}
+                  onChange={(e) => setVoucherInput(e.target.value.toUpperCase())}
+                  placeholder={t.tokenInputPlaceholder}
+                  className="w-full min-h-[52px] px-4 py-2 text-base font-mono font-bold uppercase tracking-widest rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20] text-[#111113] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FFD400]/75"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">
+                  {t.deviceLabelInput} <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <Smartphone className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    minLength={2}
+                    maxLength={120}
+                    value={deviceLabel}
+                    onChange={(e) => setDeviceLabel(e.target.value)}
+                    placeholder={t.deviceLabelPlaceholder}
+                    className="w-full min-h-[48px] pl-10 pr-4 py-2 text-sm rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20] text-[#111113] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FFD400]/75"
+                  />
+                </div>
+              </div>
+
+              {tokenError && (
+                <div className="p-3.5 rounded-2xl border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/35 text-xs text-red-700 dark:text-red-300 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{tokenError}</span>
+                </div>
+              )}
+
+              {tokenNotice && (
+                <div className="p-3.5 rounded-2xl border border-[#FFD400]/45 bg-[#FFD400]/12 text-xs text-[#9A7B00] dark:text-[#FFD400]">
+                  {tokenNotice}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                <button
+                  type="button"
+                  disabled={validating || !voucherInput.trim()}
+                  onClick={() => handleValidateVoucher()}
+                  className="btn-secondary min-h-[48px] rounded-2xl text-xs w-full"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  {validating ? t.validatingBtn : t.validateBtn}
+                </button>
+                <button
+                  type="button"
+                  disabled={activating || !voucherInput.trim()}
+                  onClick={() => handleRedeemVoucher()}
+                  className="btn-primary min-h-[48px] rounded-2xl text-xs w-full"
+                >
+                  <Wifi className="w-4 h-4" />
+                  {activating ? t.activatingBtn : t.activateBtn}
+                </button>
+              </div>
+            </div>
+
+            {validation && (
+              <div className="ios-grouped-cell p-4 space-y-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-black/[0.06] dark:border-white/[0.07]">
+                  <span className="font-mono font-bold text-sm">{validation.codeMasked}</span>
+                  <span
+                    className={`font-semibold ${
+                      validation.valid ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'
+                    }`}
+                  >
+                    {validation.valid ? t.validBadge : `${t.invalidBadge} (${validation.status})`}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 tabular-nums">
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400 block">{t.packageLabel}</span>
+                    <span className="font-semibold">{validation.packageName}</span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400 block">{t.priceLabel}</span>
+                    <span className="font-mono font-semibold">{formatTzs(validation.priceTzs)}</span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400 block">{t.durationLabel}</span>
+                    <span className="font-semibold">
+                      {formatDurationLocalized(validation.durationMinutes, lang)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400 block">{t.speedLabel}</span>
+                    <span className="font-mono">{formatSpeed(validation.downloadKbps)}</span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400 block">{t.dataCapLabel}</span>
+                    <span className="font-mono">
+                      {validation.dataLimitMb ? `${validation.dataLimitMb} MB` : t.unlimited}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400 block">{t.deviceLockLabel}</span>
+                    <span className="font-mono font-semibold">
+                      {validation.boundDeviceName
+                        ? validation.boundDeviceName
+                        : validation.isBoundToDevice
+                        ? t.boundDeviceYes
+                        : t.boundDeviceNo}
+                    </span>
+                  </div>
+                </div>
+
+                {validation.revokedReason && (
+                  <p className="text-red-600 dark:text-red-400 font-mono text-[11px]">
+                    {validation.revokedReason}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {operatingMode === 'STANDALONE_MODE' && (
+              <div className="pt-2 border-t border-black/[0.06] dark:border-white/[0.07]">
+                <button
+                  type="button"
+                  onClick={() => setShowHardwareInfo((prev) => !prev)}
+                  className="w-full min-h-[40px] flex items-center justify-between text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-[#111113] dark:hover:text-white cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5" />
+                    {t.showNetworkNotice}
+                  </span>
+                  <ChevronDown
+                    className={`w-4 h-4 transition-transform duration-150 ${showHardwareInfo ? 'rotate-180' : ''}`}
+                  />
+                </button>
+                {showHardwareInfo && (
+                  <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed ios-grouped-cell p-3.5">
+                    {t.airtelNoticeBody}
+                  </p>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* TAB 3: ACCOUNT HISTORY & SUPPORT */}
+        {activeTab === 'account' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            <section className="lg:col-span-6 ios-surface p-5 sm:p-6 space-y-4">
+              <div>
+                <h2 className="text-lg font-bold tracking-tight">{t.accountLookupTitle}</h2>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.accountLookupSubtitle}</p>
+              </div>
+
+              {accountError && (
+                <div className="p-3 rounded-2xl border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/35 text-xs text-red-700 dark:text-red-300">
+                  {accountError}
+                </div>
+              )}
+
+              <form onSubmit={handleLookupAccount} className="flex flex-col sm:flex-row gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    value={accountQuery}
+                    onChange={(e) => setAccountQuery(e.target.value)}
+                    placeholder={t.lookupPhonePlaceholder}
+                    className="w-full min-h-[46px] pl-10 pr-3.5 py-2 text-xs font-mono rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20]"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={searchingAccount}
+                  className="btn-primary min-h-[46px] rounded-2xl text-xs"
+                >
+                  {t.lookupBtn}
+                </button>
+              </form>
+
+              {purchases.length > 0 ? (
+                <div className="divide-y divide-black/[0.06] dark:divide-white/[0.07] ios-grouped-cell overflow-hidden">
+                  {purchases.map((p) => (
+                    <div
+                      key={p.reference}
+                      className="p-3.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-semibold truncate">
+                          {p.packageName} · {p.businessName}
+                        </div>
+                        <div className="font-mono text-zinc-500 text-[11px] tabular-nums">
+                          {p.reference} · {p.status} · {formatTzs(p.amountTzs)}
+                        </div>
+                      </div>
+                      {p.voucherCode ? (
+                        <button
+                          type="button"
+                          onClick={() => handleActivateTokenDirectly(p.voucherCode!)}
+                          className="btn-chip-accent font-mono min-h-[36px]"
+                        >
+                          {p.voucherCode} · {t.useCodeBtn}
+                        </button>
+                      ) : (
+                        <span className="font-mono text-zinc-500">{p.voucherMasked || '—'}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 py-2">{t.purchasesEmpty}</p>
+              )}
+            </section>
+
+            <section className="lg:col-span-6 ios-surface p-5 sm:p-6 space-y-4">
+              <div>
+                <h3 className="text-lg font-bold tracking-tight">{t.supportTitle}</h3>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.supportSubtitle}</p>
+              </div>
+
+              {supportNotice && (
+                <div className="p-3 rounded-2xl border border-emerald-300 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/35 text-xs text-emerald-700 dark:text-emerald-300">
+                  {supportNotice}
+                </div>
+              )}
+
+              <form onSubmit={handleSubmitSupport} className="space-y-3 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block font-semibold mb-1.5">{t.phoneLabel}</label>
+                    <input
+                      type="tel"
+                      required
+                      value={supportPhone}
+                      onChange={(e) => setSupportPhone(e.target.value)}
+                      placeholder="0754 123 456"
+                      className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20] font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold mb-1.5">{t.supportSubjectLabel}</label>
+                    <input
+                      type="text"
+                      required
+                      value={supportSubject}
+                      onChange={(e) => setSupportSubject(e.target.value)}
+                      placeholder="Voucher / Connection help"
+                      className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20]"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block font-semibold mb-1.5">{t.supportMessageLabel}</label>
+                  <textarea
+                    rows={3}
+                    required
+                    value={supportMessage}
+                    onChange={(e) => setSupportMessage(e.target.value)}
+                    placeholder="Describe your issue or payment reference..."
+                    className="w-full px-3.5 py-2.5 rounded-2xl border border-black/[0.08] dark:border-white/[0.1] bg-[#F5F5F7] dark:bg-[#1D1D20]"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={sendingSupport}
+                  className="btn-secondary min-h-[46px] rounded-2xl text-xs w-full sm:w-auto"
+                >
+                  <LifeBuoy className="w-4 h-4" />
+                  {t.supportSubmitBtn}
+                </button>
+              </form>
+            </section>
+          </div>
+        )}
+
+          </MobilePageTransition>
+        </AnimatePresence>
+
+        {/* Quiet Customer Footer with Discreet Operator Link */}
+        <footer className="pt-4 border-t border-black/[0.06] dark:border-white/[0.07] flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-500">
+          <span>
+            {currentBusiness?.name || 'TRAX LINK'} · CONNECT. MANAGE. GROW.
+          </span>
+          <button
+            type="button"
+            onClick={onSwitchToAdmin}
+            className="text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-[#111113] dark:hover:text-[#FFD400] transition-colors cursor-pointer"
+          >
+            {t.staffLink}
+          </button>
+        </footer>
       </main>
+
+      {/* Fixed iPhone-Style Frosted Bottom Tab Bar (Mobile Only) */}
+      <LayoutGroup id="portalMobileNav">
+        <nav
+          aria-label="Customer bottom navigation"
+          className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t ios-glass-bar pb-safe"
+        >
+          <div className="grid grid-cols-3 h-[56px] items-center max-w-md mx-auto">
+            {(
+              [
+                { key: 'buy', label: t.tabBuyShort, Icon: Wifi },
+                { key: 'connect', label: t.tabConnectShort, Icon: KeyRound },
+                { key: 'account', label: t.tabAccountShort, Icon: UserCircle2 },
+              ] as const
+            ).map(({ key, label, Icon }) => {
+              const isActive = activeTab === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => switchTab(key)}
+                  className={`relative min-h-[44px] flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
+                    isActive
+                      ? 'text-[#9A7B00] dark:text-[#FFD400]'
+                      : 'text-zinc-500 dark:text-zinc-400'
+                  }`}
+                >
+                  {isActive && (
+                    <motion.span
+                      layoutId="portalMobileTabIndicator"
+                      transition={NATIVE_SPRING}
+                      className="absolute top-0.5 w-8 h-0.5 rounded-full bg-[#FFD400]"
+                      aria-hidden="true"
+                    />
+                  )}
+                  <Icon className="w-5 h-5" />
+                  <span className="text-[11px] font-semibold tracking-tight whitespace-nowrap">
+                    {label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      </LayoutGroup>
     </div>
   );
 }

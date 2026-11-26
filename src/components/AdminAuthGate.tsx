@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { AnimatePresence } from 'motion/react';
 import { signInWithPopup } from 'firebase/auth';
 import {
   ArrowLeft,
@@ -21,6 +22,7 @@ import { apiRequest } from '../lib/api.ts';
 import { TRANSLATIONS, type AppLanguage } from '../lib/i18n.ts';
 import { LanguageSwitcher } from './LanguageSwitcher.tsx';
 import { TraxLogo } from './NetcoLogo.tsx';
+import { MobilePageTransition } from './ui/MotionPrimitives.tsx';
 
 export interface AuthUser {
   id: string;
@@ -317,6 +319,8 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
             </div>
           )}
 
+          <AnimatePresence mode="wait" initial={false}>
+            <MobilePageTransition key={`${mode}-${forgotStep}`}>
           {mode === 'forgot' ? (
             forgotStep === 'request' ? (
               <form onSubmit={handleRequestReset} className="space-y-4">
@@ -674,6 +678,8 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
               </button>
             </form>
           )}
+            </MobilePageTransition>
+          </AnimatePresence>
 
           {mode !== 'register' && (
             <>

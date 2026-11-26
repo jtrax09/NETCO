@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { CreditCard, MapPin, Plus, Trash2, X } from 'lucide-react';
 import { apiRequest, formatTzs } from '../lib/api.ts';
+import { MobileModal } from './ui/MotionPrimitives.tsx';
 
 interface LocationItem {
   id: string;
@@ -333,9 +334,13 @@ export function LocationsView({ token, refreshTrigger, canManage }: Props) {
         </div>
       )}
 
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel="Add Hotspot Location"
+      >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">Add Hotspot Location</h3>
               <button
@@ -399,9 +404,7 @@ export function LocationsView({ token, refreshTrigger, canManage }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </MobileModal>
     </div>
   );
 }

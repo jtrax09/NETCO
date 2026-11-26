@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import { apiRequest, formatDurationMinutes, formatSpeed, formatTzs } from '../lib/api.ts';
 import { syncPublicPackageToFirestore } from '../lib/firebase.ts';
+import { MobileModal } from './ui/MotionPrimitives.tsx';
 
 type PackageType = 'TIME_BASED' | 'DATA_BASED' | 'HYBRID' | 'BANDWIDTH_PROFILE';
 
@@ -301,9 +302,13 @@ export function PackagesView({ token, canManage }: Props) {
         </div>
       )}
 
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-lg w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+      <MobileModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        maxWidthClass="max-w-lg"
+        panelClassName="space-y-4"
+        ariaLabel={editing ? 'Edit WiFi Package' : 'Create WiFi Package'}
+      >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">{editing ? 'Edit WiFi Package' : 'Create WiFi Package'}</h3>
               <button
@@ -487,9 +492,7 @@ export function PackagesView({ token, canManage }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </MobileModal>
     </div>
   );
 }

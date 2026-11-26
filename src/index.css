@@ -106,6 +106,35 @@
   .btn-tab-active {
     @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap cursor-pointer transition-all duration-150 bg-white dark:bg-[#1C1C1F] text-[#101010] dark:text-[#FFD400] border border-stone-200 dark:border-[#FFD400]/35 shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFD400]/60;
   }
+
+  .ios-surface {
+    @apply bg-white/95 dark:bg-[#161619]/95 border border-black/[0.07] dark:border-white/[0.08] rounded-[24px] shadow-[0_8px_30px_-12px_rgba(16,16,16,0.12)] dark:shadow-[0_14px_34px_-16px_rgba(0,0,0,0.75)];
+  }
+
+  .ios-grouped-cell {
+    @apply bg-[#F5F5F7] dark:bg-[#1D1D20] border border-black/[0.06] dark:border-white/[0.07] rounded-2xl;
+  }
+
+  .ios-glass-bar {
+    @apply bg-white/82 dark:bg-[#141416]/82 backdrop-blur-2xl backdrop-saturate-150 border-black/[0.08] dark:border-white/[0.08];
+  }
+
+  .ios-spring {
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+.pb-safe {
+  padding-bottom: max(0.35rem, env(safe-area-inset-bottom));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @media print {

@@ -2,12 +2,13 @@
 
 ## 1. Architecture Overview
 TRAX LINK (`CONNECT. MANAGE. GROW.`) is a multi-tenant SaaS WiFi voucher billing, customer portal, Tanzanian mobile money + card checkout, FreeRADIUS adapter, and MikroTik RouterOS management platform built with:
-- **Frontend**: React 19, Vite 8, TypeScript, Tailwind CSS v4, Lucide icons, Recharts, Socket.IO client, Firebase Auth/Firestore.
-- **Backend**: Express + Socket.IO + Node.js (`tsx server.ts`) backed by SQLite (`node:sqlite` via `src/server/db.ts`), shared domain packages (`packages/{shared,validation,billing-engine,router-adapters}`), and a Prisma PostgreSQL schema (`prisma/schema.prisma`) for containerized deployments.
+- **Frontend**: React 19, Vite 8, TypeScript, Tailwind CSS v4, Lucide icons, Recharts, Socket.IO client, Firebase Auth/Firestore (defaults to the customer portal at `/`).
+- **Python WiFi Billing Engine (`python_backend/`)**: Pure Python 3.11+ standard-library `ThreadingHTTPServer` (`python3 -m python_backend`) backed by SQLite (`python_backend/db.py`), real FreeRADIUS `radcheck`/`radreply`/`radacct` policy & RFC 5176 UDP CoA Disconnect (`python_backend/services/billing.py`), MikroTik RouterOS binary TCP/TLS API client (`python_backend/services/mikrotik.py`), Tanzanian mobile money/card gateway & HMAC webhook processor (`python_backend/services/payments.py`), and invoice generation.
+- **Node/Vite Gateway (`server.ts`)**: Supervises the Python billing process on `PYTHON_API_PORT`, proxies `/api/*` requests, bridges `X-Trax-Events` to Socket.IO, and serves Vite on port `3000`.
 
 ## 2. Multi-Tenant Isolation & RBAC
-- Every business-owned record (`customers`, `packages`, `vouchers`, `sessions`, `payments`, `routers`, `locations`, `subscriptions`, `support_tickets`, `notifications`, `audit_logs`) is strictly scoped by `business_id`.
-- Always resolve tenant scope server-side via `resolveTenantScope(db, req)` in `src/server/middleware/auth.ts`. Never trust a client-supplied `businessId` or `x-tenant-id` without verifying role authorization (`SUPER_ADMIN` only for cross-tenant inspection).
+- Every business-owned record (`customers`, `packages`, `vouchers`, `sessions`, `payments`, `invoices`, `routers`, `locations`, `subscriptions`, `support_tickets`, `notifications`, `audit_logs`) is strictly scoped by `business_id`.
+- Always resolve tenant scope server-side via `resolve_tenant_scope` in `python_backend/auth.py`. Never trust a client-supplied `businessId` or `x-tenant-id` without verifying role authorization (`SUPER_ADMIN` only for cross-tenant inspection).
 - Supported roles: `SUPER_ADMIN`, `BUSINESS_OWNER`, `ADMIN`, `ACCOUNTANT`, `NETWORK_OPERATOR`, `SUPPORT_STAFF`, `CASHIER`.
 
 ## 3. Operating Modes (`STANDALONE_MODE` vs `MIKROTIK_MODE`)

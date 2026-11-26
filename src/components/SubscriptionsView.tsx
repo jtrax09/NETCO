@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
+import { AnimatePresence } from 'motion/react';
 import { MessageSquare, Plus, RefreshCw, ShieldOff, X } from 'lucide-react';
 import { apiRequest, formatSpeed } from '../lib/api.ts';
+import { MobileModal, MobilePageTransition } from './ui/MotionPrimitives.tsx';
 
 interface SubscriptionItem {
   id: string;
@@ -207,7 +209,10 @@ export function SubscriptionsView({ token, refreshTrigger, canManage, canSupport
 
       {loading ? (
         <div className="p-8 text-center text-xs text-zinc-500">Loading subscriptions...</div>
-      ) : subTab === 'subscriptions' ? (
+      ) : (
+        <AnimatePresence mode="wait" initial={false}>
+          <MobilePageTransition key={subTab}>
+      {subTab === 'subscriptions' ? (
         <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-xl overflow-x-auto">
           {subscriptions.length === 0 ? (
             <div className="p-10 text-center text-xs text-zinc-500">
@@ -373,10 +378,17 @@ export function SubscriptionsView({ token, refreshTrigger, canManage, canSupport
           )}
         </div>
       )}
+          </MobilePageTransition>
+        </AnimatePresence>
+      )}
 
-      {createOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel="Provision RADIUS Subscription"
+      >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">Provision RADIUS Subscription</h3>
               <button
@@ -423,13 +435,17 @@ export function SubscriptionsView({ token, refreshTrigger, canManage, canSupport
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </MobileModal>
 
-      {replyTicket && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={Boolean(replyTicket)}
+        onClose={() => setReplyTicket(null)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel="Reply to Support Ticket"
+      >
+        {replyTicket && (
+          <>
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">Reply to Support Ticket</h3>
               <button
@@ -473,9 +489,9 @@ export function SubscriptionsView({ token, refreshTrigger, canManage, canSupport
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </MobileModal>
     </div>
   );
 }

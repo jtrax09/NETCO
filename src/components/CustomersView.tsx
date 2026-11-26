@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Plus, Search, UserCheck, UserX, X } from 'lucide-react';
 import { apiRequest } from '../lib/api.ts';
+import { MobileDrawer, MobileModal } from './ui/MotionPrimitives.tsx';
 
 interface Customer {
   id: string;
@@ -322,9 +323,13 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
       </div>
 
       {/* Create / Edit Modal */}
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel={editing ? 'Edit Customer' : 'Add Customer'}
+      >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">{editing ? 'Edit Customer' : 'Add Customer'}</h3>
               <button
@@ -408,14 +413,18 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </MobileModal>
 
       {/* Customer Profile Drawer */}
-      {profile && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end">
-          <div className="max-w-lg w-full h-full bg-white dark:bg-[#161618] border-l border-stone-200 dark:border-white/10 p-6 overflow-y-auto space-y-6">
+      <MobileDrawer
+        open={Boolean(profile)}
+        onClose={() => setProfile(null)}
+        side="right"
+        panelClassName="max-w-lg w-full h-full bg-white dark:bg-[#161618] border-l border-stone-200 dark:border-white/10 p-6 overflow-y-auto space-y-6"
+        ariaLabel="Customer Profile Drawer"
+      >
+        {profile && (
+          <>
             <div className="flex items-start justify-between">
               <div>
                 <p className="text-xs font-mono text-[#9A7B00] dark:text-[#FFD400]">{profile.customer.customer_code}</p>
@@ -498,9 +507,9 @@ export function CustomersView({ token, canEdit, canDelete }: Props) {
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </MobileDrawer>
     </div>
   );
 }

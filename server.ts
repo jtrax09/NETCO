@@ -1,78 +1,223 @@
 import 'dotenv/config';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import fs from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
 import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
-import {
-  createDatabase,
-  DEFAULT_BUSINESS_ID,
-  expireStaleRecords,
-  withTransaction,
-  type NetcoDb,
-} from './src/server/db.ts';
-import { createApp } from './src/server/app.ts';
-import { processDueProvisioningJobs } from './src/server/services/billing.ts';
-import { generateId, generateReference, hashPassword } from './src/server/utils/crypto.ts';
 
 const PORT = Number(process.env.PORT || 3000);
+const PYTHON_API_HOST = '127.0.0.1';
+const PREFERRED_PYTHON_API_PORT = Number(process.env.PYTHON_API_PORT || 8001);
 const isProduction = process.env.NODE_ENV === 'production';
-const DEFAULT_STAFF_ACCOUNTS = [
-  { email: 'undergodmusic255@gmail.com', fullName: 'UNDER GOD MUSIC', code: 'STF-001' },
-  { email: 'mlingwajastine277@gmail.com', fullName: 'TRAX LINK Platform Admin', code: 'STF-002' },
-];
-const DEFAULT_STAFF_PASSWORD_HASH =
-  'scrypt:5eda2d3d4bca4af575be144081e79c08:a17d12d23968499072b046c640d4264ff370ed1d9c407ab777a1820f7074d337d4096e4b269d82ef71b2c0e0a7e9f682a75fe4946cdb153522195eccd615fe00';
 
-function ensurePrimaryStaffAccount(db: NetcoDb) {
-  const customEmail = process.env.STAFF_EMAIL?.trim().toLowerCase();
-  const passwordHash = process.env.STAFF_PASSWORD?.trim()
-    ? hashPassword(process.env.STAFF_PASSWORD.trim())
-    : DEFAULT_STAFF_PASSWORD_HASH;
-  const accounts = customEmail
-    ? [{ email: customEmail, fullName: 'TRAX LINK Platform Admin', code: 'STF-001' }, ...DEFAULT_STAFF_ACCOUNTS]
-    : DEFAULT_STAFF_ACCOUNTS;
-  const nowIso = new Date().toISOString();
+function resolvePythonExecutable(): string {
+  const venvPy = path.resolve(process.cwd(), '.venv', 'bin', 'python3');
+  if (fs.existsSync(venvPy)) return venvPy;
+  return process.env.PYTHON_BIN?.trim() || 'python3';
+}
 
-  withTransaction(db, () => {
-    for (const acct of accounts) {
-      const existing = db
-        .prepare('SELECT id, password_hash FROM admin_users WHERE LOWER(email) = ?')
-        .get(acct.email) as { id: string; password_hash: string | null } | undefined;
-
-      if (existing) {
-        if (!existing.password_hash) {
-          db.prepare('UPDATE admin_users SET password_hash = ?, is_active = 1, updated_at = ? WHERE id = ?').run(
-            passwordHash,
-            nowIso,
-            existing.id
-          );
-        }
-        continue;
-      }
-
-      const adminId = generateId('adm');
-      const codeExists = db.prepare('SELECT id FROM staff WHERE staff_code = ?').get(acct.code);
-      const staffCode = codeExists ? generateReference('STF') : acct.code;
-
-      db.prepare(`
-        INSERT INTO admin_users (id, business_id, email, full_name, password_hash, role, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'SUPER_ADMIN', 1, ?, ?)
-      `).run(adminId, DEFAULT_BUSINESS_ID, acct.email, acct.fullName, passwordHash, nowIso, nowIso);
-
-      db.prepare(`
-        INSERT INTO staff (id, business_id, admin_user_id, staff_code, department, role, is_suspended)
-        VALUES (?, ?, ?, ?, 'Executive Operations', 'SUPER_ADMIN', 0)
-      `).run(generateId('stf'), DEFAULT_BUSINESS_ID, adminId, staffCode);
-    }
+function isTcpReachable(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const done = (reachable: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(reachable);
+    };
+    socket.setTimeout(200);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
   });
 }
 
-async function startServer() {
-  const db = createDatabase();
-  ensurePrimaryStaffAccount(db);
-  const httpServer = http.createServer();
+function canBindLoopback(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(port, PYTHON_API_HOST, () => {
+      probe.close(() => resolve(true));
+    });
+  });
+}
 
+function allocateFreeLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, PYTHON_API_HOST, () => {
+      const addr = probe.address();
+      if (!addr || typeof addr === 'string') {
+        probe.close(() => reject(new Error('Failed to allocate loopback port')));
+        return;
+      }
+      const { port } = addr;
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+async function resolvePythonPort(preferred: number): Promise<number> {
+  const occupiedV4 = await isTcpReachable(PYTHON_API_HOST, preferred);
+  const occupiedV6 = await isTcpReachable('::1', preferred);
+  if (!occupiedV4 && !occupiedV6 && (await canBindLoopback(preferred))) {
+    return preferred;
+  }
+  const fallbackPort = await allocateFreeLoopbackPort();
+  console.warn(
+    `[TRAX LINK Gateway] Port ${preferred} is busy; using free loopback port ${fallbackPort} for Python engine.`
+  );
+  return fallbackPort;
+}
+
+function startPythonBackend(pythonPort: number): ChildProcess {
+  const pythonBin = resolvePythonExecutable();
+  const child = spawn(
+    pythonBin,
+    ['-m', 'python_backend', '--host', PYTHON_API_HOST, '--port', String(pythonPort)],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+
+  child.stdout?.on('data', (chunk: Buffer) => {
+    process.stdout.write(chunk);
+  });
+  child.stderr?.on('data', (chunk: Buffer) => {
+    process.stderr.write(chunk);
+  });
+
+  return child;
+}
+
+async function waitForPythonHealth(
+  pythonPort: number,
+  pythonProc: ChildProcess,
+  timeoutMs = 15_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const healthUrl = `http://${PYTHON_API_HOST}:${pythonPort}/api/health`;
+  while (Date.now() < deadline) {
+    if (pythonProc.exitCode !== null) {
+      throw new Error(`Python backend exited during startup (code=${pythonProc.exitCode})`);
+    }
+    try {
+      const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(1000) });
+      if (resp.ok) {
+        const body = (await resp.json().catch(() => null)) as { engine?: string } | null;
+        if (body?.engine === 'python') return;
+      }
+    } catch {
+      // Retry until Python HTTP server is listening
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  throw new Error(`Python backend failed to pass /api/health on port ${pythonPort} within ${timeoutMs}ms`);
+}
+
+function createApiProxyMiddleware(io: SocketIOServer, pythonPort: number): express.RequestHandler {
+  return (req, res, next) => {
+    if (!req.originalUrl.startsWith('/api')) {
+      next();
+      return;
+    }
+
+    const headers: Record<string, string | string[]> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (v === undefined) continue;
+      const lower = k.toLowerCase();
+      if (lower === 'host' || lower === 'connection') continue;
+      headers[k] = v;
+    }
+
+    const remoteAddr = req.socket.remoteAddress;
+    if (remoteAddr && !headers['x-forwarded-for']) {
+      headers['x-forwarded-for'] = remoteAddr;
+    }
+
+    const proxyReq = http.request(
+      {
+        hostname: PYTHON_API_HOST,
+        port: pythonPort,
+        path: req.originalUrl,
+        method: req.method,
+        headers,
+      },
+      (proxyRes) => {
+        const rawEvents = proxyRes.headers['x-trax-events'];
+        if (typeof rawEvents === 'string') {
+          try {
+            const parsed = JSON.parse(rawEvents) as Array<{ event?: string; payload?: unknown }>;
+            if (Array.isArray(parsed)) {
+              for (const item of parsed) {
+                if (item?.event) {
+                  io.emit(item.event, item.payload ?? {});
+                }
+              }
+            }
+          } catch {
+            // Ignore malformed internal event bridge header
+          }
+        }
+
+        const outHeaders: Record<string, string | string[]> = {};
+        for (const [hk, hv] of Object.entries(proxyRes.headers)) {
+          if (hv === undefined) continue;
+          if (hk.toLowerCase() === 'x-trax-events' || hk.toLowerCase() === 'transfer-encoding') continue;
+          outHeaders[hk] = hv;
+        }
+
+        res.writeHead(proxyRes.statusCode || 502, outHeaders);
+        proxyRes.pipe(res, { end: true });
+      }
+    );
+
+    proxyReq.on('error', (err) => {
+      console.error('[TRAX LINK Gateway] Python API proxy error:', err.message);
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Python billing engine unavailable' });
+      }
+    });
+
+    req.pipe(proxyReq, { end: true });
+  };
+}
+
+async function startServer() {
+  const pythonPort = await resolvePythonPort(PREFERRED_PYTHON_API_PORT);
+  const pythonProc = startPythonBackend(pythonPort);
+
+  const cleanup = () => {
+    if (!pythonProc.killed) {
+      pythonProc.kill('SIGTERM');
+    }
+  };
+  process.on('SIGINT', () => {
+    cleanup();
+    process.exit(0);
+  });
+  process.on('SIGTERM', () => {
+    cleanup();
+    process.exit(0);
+  });
+  process.on('exit', cleanup);
+
+  pythonProc.on('exit', (code, signal) => {
+    if (code !== 0 && code !== null) {
+      console.error(`[TRAX LINK Gateway] Python backend exited unexpectedly (code=${code}, signal=${signal})`);
+    }
+  });
+
+  await waitForPythonHealth(pythonPort, pythonProc);
+
+  const httpServer = http.createServer();
   const io = new SocketIOServer(httpServer, {
     cors: {
       origin: true,
@@ -81,10 +226,12 @@ async function startServer() {
   });
 
   io.on('connection', (socket) => {
-    socket.emit('netco:connected', { timestamp: new Date().toISOString(), brand: 'TRAX LINK' });
+    socket.emit('netco:connected', { timestamp: new Date().toISOString(), brand: 'TRAX LINK', engine: 'python' });
   });
 
-  const app = createApp(db, io);
+  const app = express();
+  app.disable('x-powered-by');
+  app.use(createApiProxyMiddleware(io, pythonPort));
 
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
@@ -106,25 +253,10 @@ async function startServer() {
 
   httpServer.on('request', app);
 
-  // Periodic background sweep for expired sessions/vouchers/subscriptions + offline router retries
-  const sweepTimer = setInterval(async () => {
-    try {
-      const res = expireStaleRecords(db);
-      if (res.expiredSessions > 0 || res.expiredSubscriptions > 0) {
-        io.emit('session:ended', {
-          expiredCount: res.expiredSessions,
-          expiredSubscriptions: res.expiredSubscriptions,
-        });
-      }
-      await processDueProvisioningJobs(db, 10);
-    } catch (err) {
-      console.error('Background sweep error:', err);
-    }
-  }, 30_000);
-  sweepTimer.unref();
-
   httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`TRAX LINK Platform listening on http://0.0.0.0:${PORT}`);
+    console.log(
+      `TRAX LINK Gateway listening on http://0.0.0.0:${PORT} -> Python WiFi Billing Engine on ${PYTHON_API_HOST}:${pythonPort}`
+    );
   });
 }
 

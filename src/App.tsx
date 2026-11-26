@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { signOut } from 'firebase/auth';
+import { AnimatePresence, MotionConfig } from 'motion/react';
 import {
   Activity,
   BarChart3,
@@ -44,6 +45,7 @@ import {
   type GlassNavGroup,
   type GlassNavItem,
 } from './components/ui/liquid-glass-expandable-sidebar.tsx';
+import { MobileDrawer, MobilePageTransition } from './components/ui/MotionPrimitives.tsx';
 import { apiRequest, setActiveTenantId } from './lib/api.ts';
 import { auth, syncWorkspacePreference } from './lib/firebase.ts';
 import { getInitialLanguage, saveLanguage, TRANSLATIONS, type AppLanguage } from './lib/i18n.ts';
@@ -208,31 +210,39 @@ function TraxLinkWorkspace() {
 
   if (surface === 'portal') {
     return (
-      <PortalView
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        lang={lang}
-        onToggleLang={toggleLang}
-        onSwitchToAdmin={() => {
-          setSurface('admin');
-        }}
-      />
+      <AnimatePresence mode="wait" initial={false}>
+        <MobilePageTransition key="surface-portal">
+          <PortalView
+            theme={theme}
+            onToggleTheme={toggleTheme}
+            lang={lang}
+            onToggleLang={toggleLang}
+            onSwitchToAdmin={() => {
+              setSurface('admin');
+            }}
+          />
+        </MobilePageTransition>
+      </AnimatePresence>
     );
   }
 
   if (!token || !user) {
     return (
-      <AdminAuthGate
-        lang={lang}
-        onToggleLang={toggleLang}
-        onAuthenticated={handleAuthenticated}
-        onSwitchToPortal={() => {
-          if (window.location.hash === '#admin') {
-            window.location.hash = '';
-          }
-          setSurface('portal');
-        }}
-      />
+      <AnimatePresence mode="wait" initial={false}>
+        <MobilePageTransition key="surface-auth">
+          <AdminAuthGate
+            lang={lang}
+            onToggleLang={toggleLang}
+            onAuthenticated={handleAuthenticated}
+            onSwitchToPortal={() => {
+              if (window.location.hash === '#admin') {
+                window.location.hash = '';
+              }
+              setSurface('portal');
+            }}
+          />
+        </MobilePageTransition>
+      </AnimatePresence>
     );
   }
 
@@ -349,45 +359,44 @@ function TraxLinkWorkspace() {
       </div>
 
       {/* Mobile Sidebar Overlay */}
-      {mobileMenuOpen && (
-        <div className="no-print fixed inset-0 z-50 lg:hidden flex">
-          <div
-            className="fixed inset-0 bg-black/65 backdrop-blur-xs"
+      <MobileDrawer
+        open={mobileMenuOpen}
+        onClose={() => setMobileMenuOpen(false)}
+        side="left"
+        wrapperClassName="lg:hidden"
+        panelClassName="flex flex-col gap-2.5 p-3 max-w-[90vw] h-full"
+        ariaLabel="Mobile navigation menu"
+      >
+        <div className="flex items-center justify-end">
+          <button
+            type="button"
             onClick={() => setMobileMenuOpen(false)}
-          />
-          <div className="relative z-10 flex flex-col gap-2.5 p-3 max-w-[90vw] h-full">
-            <div className="flex items-center justify-end">
-              <button
-                type="button"
-                onClick={() => setMobileMenuOpen(false)}
-                aria-label="Close navigation menu"
-                className="btn-icon min-h-[38px] min-w-[38px] p-1.5 shadow-md"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex-1 min-h-0 flex">
-              <LiquidGlassExpandableSidebar
-                brand="TRAX LINK"
-                brandDetail={activeTenantName || tAdmin.brandDetail}
-                brandIcon={brandIcon}
-                groups={navGroups}
-                activeId={section}
-                defaultExpanded={true}
-                accent="#FFD400"
-                glass={glassMaterial}
-                account={sidebarAccount}
-                onNavigate={handleSidebarNavigate}
-                style={{ '--gn-sidebar-inset': '132px' } as React.CSSProperties}
-              />
-            </div>
-            <button type="button" onClick={handleLogout} className="btn-secondary w-full text-xs shadow-md">
-              <LogOut className="w-3.5 h-3.5" />
-              {tAdmin.signOut}
-            </button>
-          </div>
+            aria-label="Close navigation menu"
+            className="btn-icon min-h-[38px] min-w-[38px] p-1.5 shadow-md"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
-      )}
+        <div className="flex-1 min-h-0 flex">
+          <LiquidGlassExpandableSidebar
+            brand="TRAX LINK"
+            brandDetail={activeTenantName || tAdmin.brandDetail}
+            brandIcon={brandIcon}
+            groups={navGroups}
+            activeId={section}
+            defaultExpanded={true}
+            accent="#FFD400"
+            glass={glassMaterial}
+            account={sidebarAccount}
+            onNavigate={handleSidebarNavigate}
+            style={{ '--gn-sidebar-inset': '132px' } as React.CSSProperties}
+          />
+        </div>
+        <button type="button" onClick={handleLogout} className="btn-secondary w-full text-xs shadow-md">
+          <LogOut className="w-3.5 h-3.5" />
+          {tAdmin.signOut}
+        </button>
+      </MobileDrawer>
 
       {/* Main Content Area */}
       <div className="relative z-10 flex-1 flex flex-col min-w-0">
@@ -463,64 +472,68 @@ function TraxLinkWorkspace() {
           </div>
         </header>
 
-        <main className="flex-1 p-3.5 sm:p-6 max-w-[1440px] w-full mx-auto">
-          {section === 'superadmin' && isSuperAdmin && (
-            <SuperAdminView
-              token={token}
-              refreshTrigger={refreshTrigger}
-              activeTenantId={activeTenantId}
-              onSelectTenant={handleSelectTenantWorkspace}
-            />
-          )}
-          {section === 'dashboard' && (
-            <DashboardView
-              token={token}
-              refreshTrigger={refreshTrigger}
-              onNavigate={(s) => setSection(s as AdminSection)}
-            />
-          )}
-          {section === 'customers' && (
-            <CustomersView token={token} canEdit={isCashier} canDelete={isBusinessManager} />
-          )}
-          {section === 'packages' && <PackagesView token={token} canManage={isBusinessManager} />}
-          {section === 'vouchers' && (
-            <VouchersView
-              token={token}
-              refreshTrigger={refreshTrigger}
-              canGenerate={isCashier}
-              canRevoke={isBusinessManager}
-            />
-          )}
-          {section === 'subscriptions' && (
-            <SubscriptionsView
-              token={token}
-              refreshTrigger={refreshTrigger}
-              canManage={isOperator || isFinance}
-              canSupport={isSupport}
-            />
-          )}
-          {section === 'sessions' && (
-            <SessionsView token={token} refreshTrigger={refreshTrigger} canControl={isOperator} />
-          )}
-          {section === 'payments' && (
-            <PaymentsView token={token} refreshTrigger={refreshTrigger} canRefund={isFinance} />
-          )}
-          {section === 'locations' && (
-            <LocationsView token={token} refreshTrigger={refreshTrigger} canManage={isBusinessManager} />
-          )}
-          {section === 'routers' && (
-            <RoutersView
-              token={token}
-              refreshTrigger={refreshTrigger}
-              canManage={isOperator}
-              canDelete={isBusinessManager}
-            />
-          )}
-          {section === 'reports' && <ReportsView token={token} />}
-          {section === 'notifications' && (
-            <NotificationsView token={token} refreshTrigger={refreshTrigger} />
-          )}
-          {section === 'staff' && <StaffAuditView token={token} currentRole={user.role} />}
+        <main className="flex-1 p-3.5 sm:p-6 max-w-[1440px] w-full mx-auto overflow-x-clip">
+          <AnimatePresence mode="wait" initial={false}>
+            <MobilePageTransition key={section}>
+              {section === 'superadmin' && isSuperAdmin && (
+                <SuperAdminView
+                  token={token}
+                  refreshTrigger={refreshTrigger}
+                  activeTenantId={activeTenantId}
+                  onSelectTenant={handleSelectTenantWorkspace}
+                />
+              )}
+              {section === 'dashboard' && (
+                <DashboardView
+                  token={token}
+                  refreshTrigger={refreshTrigger}
+                  onNavigate={(s) => setSection(s as AdminSection)}
+                />
+              )}
+              {section === 'customers' && (
+                <CustomersView token={token} canEdit={isCashier} canDelete={isBusinessManager} />
+              )}
+              {section === 'packages' && <PackagesView token={token} canManage={isBusinessManager} />}
+              {section === 'vouchers' && (
+                <VouchersView
+                  token={token}
+                  refreshTrigger={refreshTrigger}
+                  canGenerate={isCashier}
+                  canRevoke={isBusinessManager}
+                />
+              )}
+              {section === 'subscriptions' && (
+                <SubscriptionsView
+                  token={token}
+                  refreshTrigger={refreshTrigger}
+                  canManage={isOperator || isFinance}
+                  canSupport={isSupport}
+                />
+              )}
+              {section === 'sessions' && (
+                <SessionsView token={token} refreshTrigger={refreshTrigger} canControl={isOperator} />
+              )}
+              {section === 'payments' && (
+                <PaymentsView token={token} refreshTrigger={refreshTrigger} canRefund={isFinance} />
+              )}
+              {section === 'locations' && (
+                <LocationsView token={token} refreshTrigger={refreshTrigger} canManage={isBusinessManager} />
+              )}
+              {section === 'routers' && (
+                <RoutersView
+                  token={token}
+                  refreshTrigger={refreshTrigger}
+                  canManage={isOperator}
+                  canDelete={isBusinessManager}
+                />
+              )}
+              {section === 'reports' && <ReportsView token={token} />}
+              {section === 'notifications' && (
+                <NotificationsView token={token} refreshTrigger={refreshTrigger} />
+              )}
+              {section === 'staff' && <StaffAuditView token={token} currentRole={user.role} />}
+            </MobilePageTransition>
+          </AnimatePresence>
         </main>
       </div>
     </div>
@@ -529,8 +542,10 @@ function TraxLinkWorkspace() {
 
 export default function App() {
   return (
-    <ErrorBoundary>
-      <TraxLinkWorkspace />
-    </ErrorBoundary>
+    <MotionConfig reducedMotion="user">
+      <ErrorBoundary>
+        <TraxLinkWorkspace />
+      </ErrorBoundary>
+    </MotionConfig>
   );
 }

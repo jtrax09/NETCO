@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { CreditCard, Receipt, RotateCcw, X } from 'lucide-react';
 import { apiRequest, formatTzs } from '../lib/api.ts';
 import { getProviderBrand } from '../lib/paymentProviders.ts';
+import { MobileModal } from './ui/MotionPrimitives.tsx';
 
 interface ProviderStatus {
   provider: string;
@@ -255,9 +256,15 @@ export function PaymentsView({ token, refreshTrigger, canRefund }: Props) {
         )}
       </div>
 
-      {receiptModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={Boolean(receiptModal)}
+        onClose={() => setReceiptModal(null)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel="TRAX LINK Payment Receipt"
+      >
+        {receiptModal && (
+          <>
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">TRAX LINK Payment Receipt</h3>
               <button
@@ -308,9 +315,9 @@ export function PaymentsView({ token, refreshTrigger, canRefund }: Props) {
                 Print Receipt
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </MobileModal>
     </div>
   );
 }

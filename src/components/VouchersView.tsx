@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Download, FileText, Plus, Printer, Search, X } from 'lucide-react';
 import { apiRequest, formatDurationMinutes, formatTzs, getTenantHeaders } from '../lib/api.ts';
 import { exportVouchersPdf } from '../lib/pdfExport.ts';
+import { MobileModal } from './ui/MotionPrimitives.tsx';
 
 interface VoucherItem {
   id: string;
@@ -356,9 +357,13 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
       </div>
 
       {/* Generate Batch Modal */}
-      {genOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={genOpen}
+        onClose={() => setGenOpen(false)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel="Generate Vouchers"
+      >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">Generate Vouchers</h3>
               <button
@@ -450,56 +455,60 @@ export function VouchersView({ token, refreshTrigger, canGenerate, canRevoke }: 
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </MobileModal>
 
       {/* Redemption History Modal */}
-      {redemptionsModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-lg w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-base font-semibold">Voucher Redemption History</h3>
-                <p className="text-xs font-mono text-slate-500 dark:text-[#8793A5]">
-                  {redemptionsModal.voucher.code || redemptionsModal.voucher.codeMasked}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setRedemptionsModal(null)}
-                aria-label="Close history modal"
-                className="btn-icon min-h-[34px] min-w-[34px] p-1.5"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            {redemptionsModal.logs.length === 0 ? (
-              <p className="text-xs text-slate-500 dark:text-[#8793A5] py-6 text-center">
-                This voucher has no redemption attempts yet.
-              </p>
-            ) : (
-              <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-72 overflow-y-auto text-xs">
-                {redemptionsModal.logs.map((l) => (
-                  <div key={l.id} className="py-2.5 flex items-start justify-between gap-3">
-                    <div>
-                      <p className={l.success ? 'text-emerald-500 font-medium' : 'text-red-400 font-medium'}>
-                        {l.success ? 'Allowed' : 'Blocked'} · {l.reason}
-                      </p>
-                      <p className="text-slate-500 dark:text-[#8793A5] font-mono">
-                        {l.deviceLabel || l.deviceFingerprint} · IP {l.ipAddress || 'N/A'}
-                      </p>
-                    </div>
-                    <span className="font-mono text-[11px] text-slate-500 shrink-0">
-                      {new Date(l.redeemedAt).toLocaleString()}
-                    </span>
+      <MobileModal
+        open={Boolean(redemptionsModal)}
+        onClose={() => setRedemptionsModal(null)}
+        maxWidthClass="max-w-lg"
+        panelClassName="space-y-4"
+        ariaLabel="Voucher Redemption History"
+      >
+            {redemptionsModal && (
+              <>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base font-semibold">Voucher Redemption History</h3>
+                    <p className="text-xs font-mono text-slate-500 dark:text-[#8793A5]">
+                      {redemptionsModal.voucher.code || redemptionsModal.voucher.codeMasked}
+                    </p>
                   </div>
-                ))}
-              </div>
+                  <button
+                    type="button"
+                    onClick={() => setRedemptionsModal(null)}
+                    aria-label="Close history modal"
+                    className="btn-icon min-h-[34px] min-w-[34px] p-1.5"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                {redemptionsModal.logs.length === 0 ? (
+                  <p className="text-xs text-slate-500 dark:text-[#8793A5] py-6 text-center">
+                    This voucher has no redemption attempts yet.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-72 overflow-y-auto text-xs">
+                    {redemptionsModal.logs.map((l) => (
+                      <div key={l.id} className="py-2.5 flex items-start justify-between gap-3">
+                        <div>
+                          <p className={l.success ? 'text-emerald-500 font-medium' : 'text-red-400 font-medium'}>
+                            {l.success ? 'Allowed' : 'Blocked'} · {l.reason}
+                          </p>
+                          <p className="text-slate-500 dark:text-[#8793A5] font-mono">
+                            {l.deviceLabel || l.deviceFingerprint} · IP {l.ipAddress || 'N/A'}
+                          </p>
+                        </div>
+                        <span className="font-mono text-[11px] text-slate-500 shrink-0">
+                          {new Date(l.redeemedAt).toLocaleString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
-          </div>
-        </div>
-      )}
+      </MobileModal>
     </div>
   );
 }

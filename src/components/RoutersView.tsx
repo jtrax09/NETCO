@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Activity, Check, Copy, KeyRound, Plus, RefreshCw, Router as RouterIcon, ShieldAlert, Trash2, Wifi, X } from 'lucide-react';
 import { apiRequest, formatBytes } from '../lib/api.ts';
+import { MobileModal } from './ui/MotionPrimitives.tsx';
 
 interface RouterItem {
   id: string;
@@ -546,9 +547,13 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
         </div>
       )}
 
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+      <MobileModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel={editing ? 'Edit MikroTik Router' : 'Connect MikroTik Router (Optional)'}
+      >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">{editing ? 'Edit MikroTik Router' : 'Connect MikroTik Router (Optional)'}</h3>
               <button
@@ -682,13 +687,17 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </MobileModal>
 
-      {selectedIfaces && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-xl w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={Boolean(selectedIfaces)}
+        onClose={() => setSelectedIfaces(null)}
+        maxWidthClass="max-w-xl"
+        panelClassName="space-y-4"
+        ariaLabel="Router Interfaces"
+      >
+        {selectedIfaces && (
+          <>
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">{selectedIfaces.routerName} — Interfaces</h3>
               <button
@@ -730,13 +739,19 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                 </table>
               </div>
             )}
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </MobileModal>
 
-      {snippetModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-2xl w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={Boolean(snippetModal)}
+        onClose={() => setSnippetModal(null)}
+        maxWidthClass="max-w-2xl"
+        panelClassName="space-y-4"
+        ariaLabel="WireGuard + FreeRADIUS Script"
+      >
+        {snippetModal && (
+          <>
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h3 className="text-base font-semibold">
@@ -772,9 +787,9 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                 {copiedSnippet ? 'Copied Script' : 'Copy RouterOS Script'}
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </MobileModal>
     </div>
   );
 }

@@ -1,25 +1,100 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import http from 'node:http';
+import net from 'node:net';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import crypto from 'node:crypto';
-import { createDatabase, type NetcoDb } from '../db.ts';
-import { createApp } from '../app.ts';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 
 interface TestServer {
   baseUrl: string;
+  dbPath: string;
   close: () => Promise<void>;
 }
 
-async function startTestServer(db: NetcoDb): Promise<TestServer> {
-  const app = createApp(db);
-  const server = http.createServer(app);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  const address = server.address();
-  if (!address || typeof address === 'string') {
-    throw new Error('Failed to bind test server');
+async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      if (!addr || typeof addr === 'string') {
+        srv.close();
+        reject(new Error('Failed to bind ephemeral port'));
+        return;
+      }
+      const { port } = addr;
+      srv.close((err) => (err ? reject(err) : resolve(port)));
+    });
+  });
+}
+
+async function startPythonTestServer(): Promise<TestServer> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trax-py-test-'));
+  const dbPath = path.join(tmpDir, 'test.db');
+  const port = await getFreePort();
+
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined) env[k] = v;
   }
+  delete env.ADMIN_INITIAL_PASSCODE;
+  delete env.HALOPESA_MERCHANT_CODE;
+  delete env.HALOPESA_API_SECRET;
+  delete env.HALOPESA_WEBHOOK_SECRET;
+  env.MPESA_WEBHOOK_SECRET = 'test_mpesa_secret_key_2026';
+  env.RADIUS_SHARED_SECRET = 'radius_test_secret_2026';
+  env.PYTHONUNBUFFERED = '1';
+
+  const child: ChildProcess = spawn(
+    'python3',
+    ['-m', 'python_backend', '--no-seed-staff', '--host', '127.0.0.1', '--port', String(port), '--db', dbPath],
+    {
+      cwd: process.cwd(),
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 10_000;
+  let healthy = false;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/health`);
+      if (res.ok) {
+        healthy = true;
+        break;
+      }
+    } catch {
+      // retry until Python server binds
+    }
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  if (!healthy) {
+    child.kill('SIGKILL');
+    throw new Error('Python test server failed to start');
+  }
+
   return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
+    baseUrl,
+    dbPath,
+    close: async () => {
+      if (!child.killed) {
+        child.kill('SIGTERM');
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            if (!child.killed) child.kill('SIGKILL');
+            resolve();
+          }, 1500);
+          child.once('exit', () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    },
   };
 }
 
@@ -47,16 +122,18 @@ async function api(
   return { status: res.status, json, headers: res.headers };
 }
 
-describe('NETCO Network Management System — End-to-End Backend Suite', () => {
-  let db: NetcoDb;
+describe('TRAX LINK Python WiFi Billing — End-to-End Backend Suite', () => {
+  let db: DatabaseSync;
   let srv: TestServer;
   let adminToken: string;
 
   beforeEach(async () => {
     delete process.env.ADMIN_INITIAL_PASSCODE;
     process.env.MPESA_WEBHOOK_SECRET = 'test_mpesa_secret_key_2026';
-    db = createDatabase(':memory:');
-    srv = await startTestServer(db);
+    process.env.RADIUS_SHARED_SECRET = 'radius_test_secret_2026';
+    srv = await startPythonTestServer();
+    db = new DatabaseSync(srv.dbPath);
+    db.exec('PRAGMA busy_timeout = 5000;');
 
     const boot = await api(srv.baseUrl, '/api/auth/bootstrap', {
       method: 'POST',
@@ -71,8 +148,8 @@ describe('NETCO Network Management System — End-to-End Backend Suite', () => {
   });
 
   afterEach(async () => {
-    await srv.close();
     db.close();
+    await srv.close();
   });
 
   it('authenticates admin, blocks duplicate bootstrap, and revokes session on logout', async () => {

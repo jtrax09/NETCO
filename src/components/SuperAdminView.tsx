@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
+import { AnimatePresence } from 'motion/react';
 import { ArrowRight, Building2, Plus, RefreshCw, X } from 'lucide-react';
 import { apiRequest, formatTzs } from '../lib/api.ts';
+import { MobileModal, MobilePageTransition } from './ui/MotionPrimitives.tsx';
 
 interface PlatformOverview {
   stats: {
@@ -266,7 +268,10 @@ export function SuperAdminView({ token, refreshTrigger, activeTenantId, onSelect
 
       {loading ? (
         <div className="p-8 text-center text-xs text-zinc-500">Loading platform administration data...</div>
-      ) : subTab === 'businesses' ? (
+      ) : (
+        <AnimatePresence mode="wait" initial={false}>
+          <MobilePageTransition key={subTab}>
+      {subTab === 'businesses' ? (
         <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-xl overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="border-b border-stone-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400">
@@ -460,10 +465,17 @@ export function SuperAdminView({ token, refreshTrigger, activeTenantId, onSelect
           </div>
         )
       )}
+          </MobilePageTransition>
+        </AnimatePresence>
+      )}
 
-      {planModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={planModalOpen}
+        onClose={() => setPlanModalOpen(false)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel="Create SaaS Plan"
+      >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">Create SaaS Plan</h3>
               <button
@@ -577,9 +589,7 @@ export function SuperAdminView({ token, refreshTrigger, activeTenantId, onSelect
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </MobileModal>
     </div>
   );
 }

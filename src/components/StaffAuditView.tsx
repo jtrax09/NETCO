@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
+import { AnimatePresence } from 'motion/react';
 import { Check, Copy, Eye, EyeOff, Key, KeyRound, Plus, Shield, X } from 'lucide-react';
 import { apiRequest } from '../lib/api.ts';
+import { MobileModal, MobilePageTransition } from './ui/MotionPrimitives.tsx';
 
 type StaffRoleValue =
   | 'SUPER_ADMIN'
@@ -262,7 +264,10 @@ export function StaffAuditView({ token, currentRole }: Props) {
 
       {loading ? (
         <div className="p-8 text-center text-xs text-slate-500">Loading administration records...</div>
-      ) : subTab === 'staff' ? (
+      ) : (
+        <AnimatePresence mode="wait" initial={false}>
+          <MobilePageTransition key={subTab}>
+      {subTab === 'staff' ? (
         <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
@@ -398,10 +403,17 @@ export function StaffAuditView({ token, currentRole }: Props) {
           </table>
         </div>
       )}
+          </MobilePageTransition>
+        </AnimatePresence>
+      )}
 
-      {createOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
+      <MobileModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        maxWidthClass="max-w-md"
+        panelClassName="space-y-4"
+        ariaLabel="Create Staff Account"
+      >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold">Create Staff Account</h3>
               <button
@@ -500,14 +512,28 @@ export function StaffAuditView({ token, currentRole }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </MobileModal>
 
-      {resetTarget && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-sm w-full bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 rounded-xl p-6 space-y-4">
-            <h3 className="text-base font-semibold">Reset Password — {resetTarget.fullName}</h3>
+      <MobileModal
+        open={Boolean(resetTarget)}
+        onClose={() => setResetTarget(null)}
+        maxWidthClass="max-w-sm"
+        panelClassName="space-y-4"
+        ariaLabel="Reset Staff Password"
+      >
+        {resetTarget && (
+          <>
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold">Reset Password — {resetTarget.fullName}</h3>
+              <button
+                type="button"
+                onClick={() => setResetTarget(null)}
+                aria-label="Close modal"
+                className="btn-icon min-h-[34px] min-w-[34px] p-1.5"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
             <form onSubmit={handleResetPassword} className="space-y-3 text-xs">
               <div className="relative">
                 <input
@@ -541,9 +567,9 @@ export function StaffAuditView({ token, currentRole }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </MobileModal>
     </div>
   );
 }
