@@ -566,6 +566,295 @@ class TraxPythonBillingTests(unittest.TestCase):
         self.assertEqual(cs, 200)
         self.assertTrue(str(cresp["payment"]["voucherCode"]).startswith("NTC-"))
 
+    def test_business_settings_update_and_portal_reflection(self) -> None:
+        gs, gbody = _api(self.base_url, "/api/business/settings", token=self.admin_token)
+        self.assertEqual(gs, 200)
+        self.assertEqual(gbody["settings"]["currency"], "TZS")
+
+        ps, pbody = _api(
+            self.base_url,
+            "/api/business/settings",
+            method="PATCH",
+            token=self.admin_token,
+            body={
+                "hotspotTitle": "Zanzibar Fiber Lounge",
+                "hotspotSupportPhone": "+255754888999",
+                "currency": "TZS",
+                "timezone": "Africa/Dar_es_Salaam",
+            },
+        )
+        self.assertEqual(ps, 200)
+        self.assertEqual(pbody["settings"]["hotspotTitle"], "Zanzibar Fiber Lounge")
+        self.assertEqual(pbody["settings"]["hotspotSupportPhone"], "+255754888999")
+
+        pub_s, pub_body = _api(self.base_url, "/api/portal/businesses")
+        self.assertEqual(pub_s, 200)
+        self.assertTrue(
+            any(
+                b.get("hotspotTitle") == "Zanzibar Fiber Lounge"
+                and b.get("hotspotSupportPhone") == "+255754888999"
+                for b in pub_body.get("businesses", [])
+            )
+        )
+
+    def test_manual_payment_reconciliation_and_invoice(self) -> None:
+        s, pkg = _api(
+            self.base_url,
+            "/api/packages",
+            method="POST",
+            token=self.admin_token,
+            body={
+                "name": "Reconcile Fiber Pass",
+                "category": "DAILY",
+                "priceTzs": 2500,
+                "durationMinutes": 1440,
+                "downloadKbps": 8000,
+                "uploadKbps": 4000,
+            },
+        )
+        self.assertEqual(s, 201)
+        pkg_id = pkg["package"]["id"]
+
+        ps, pinit = _api(
+            self.base_url,
+            "/api/portal/payments/initiate",
+            method="POST",
+            body={
+                "packageId": pkg_id,
+                "provider": "MPESA",
+                "phoneNumber": "0754222333",
+            },
+        )
+        self.assertEqual(ps, 201)
+        pay_row = self.db.query_one(
+            "SELECT id, reference FROM payments WHERE reference = ?", (pinit["payment"]["reference"],)
+        )
+        self.assertIsNotNone(pay_row)
+        pid = str(pay_row["id"])
+
+        rs, rbody = _api(
+            self.base_url,
+            f"/api/payments/{pid}/reconcile",
+            method="POST",
+            token=self.admin_token,
+            body={"externalTxId": "MPESA-VERIFY-9911", "note": "Verified on statement"},
+        )
+        self.assertEqual(rs, 200)
+        self.assertEqual(rbody["outcome"]["status"], "COMPLETED")
+        self.assertTrue(str(rbody["outcome"]["issuedVoucherCode"]).startswith("NTC-"))
+
+        inv_s, inv_body = _api(self.base_url, "/api/invoices", token=self.admin_token)
+        self.assertEqual(inv_s, 200)
+        self.assertTrue(
+            any(i["paymentReference"] == pay_row["reference"] for i in inv_body.get("invoices", []))
+        )
+
+        # Second reconciliation attempt on COMPLETED payment must be rejected
+        dup_s, _ = _api(
+            self.base_url,
+            f"/api/payments/{pid}/reconcile",
+            method="POST",
+            token=self.admin_token,
+            body={"externalTxId": "MPESA-VERIFY-9911"},
+        )
+        self.assertEqual(dup_s, 400)
+
+    def test_routers_bandwidth_overview_and_live_series(self) -> None:
+        srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv_sock.bind(("127.0.0.1", 0))
+        srv_sock.listen(4)
+        ros_port = srv_sock.getsockname()[1]
+        stop_flag = threading.Event()
+        poll_count = {"n": 0}
+
+        def _mock_ros() -> None:
+            while not stop_flag.is_set():
+                try:
+                    srv_sock.settimeout(0.2)
+                    conn, _ = srv_sock.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                with conn:
+                    while True:
+                        words = _read_ros_sentence(conn)
+                        if not words:
+                            break
+                        cmd = words[0]
+                        if cmd == "/login":
+                            conn.sendall(encode_sentence(["!done"]))
+                        elif cmd == "/system/resource/print":
+                            conn.sendall(
+                                encode_sentence(
+                                    [
+                                        "!re",
+                                        "=cpu-load=22",
+                                        "=total-memory=268435456",
+                                        "=free-memory=134217728",
+                                        "=uptime=1d02:00:00",
+                                        "=version=7.14.2",
+                                        "=board-name=RB750Gr3",
+                                    ]
+                                )
+                            )
+                            conn.sendall(encode_sentence(["!done"]))
+                        elif cmd == "/interface/print":
+                            poll_count["n"] += 1
+                            rx_val = 2097152 * poll_count["n"]
+                            tx_val = 1048576 * poll_count["n"]
+                            conn.sendall(
+                                encode_sentence(
+                                    [
+                                        "!re",
+                                        "=name=ether1-wan",
+                                        "=type=ether",
+                                        "=running=true",
+                                        "=disabled=false",
+                                        f"=rx-byte={rx_val}",
+                                        f"=tx-byte={tx_val}",
+                                    ]
+                                )
+                            )
+                            conn.sendall(encode_sentence(["!done"]))
+                        else:
+                            conn.sendall(encode_sentence(["!done"]))
+
+        t = threading.Thread(target=_mock_ros, daemon=True)
+        t.start()
+
+        try:
+            rs, rcreated = _api(
+                self.base_url,
+                "/api/routers",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "name": "Overview Edge Router",
+                    "host": "127.0.0.1",
+                    "apiPort": ros_port,
+                    "username": "admin",
+                    "password": "secret",
+                    "routerOsFamily": "ROUTEROS_V7",
+                },
+            )
+            self.assertEqual(rs, 201)
+            rid = rcreated["router"]["id"]
+
+            ts, tres = _api(
+                self.base_url,
+                f"/api/routers/{rid}/test",
+                method="POST",
+                token=self.admin_token,
+            )
+            self.assertEqual(ts, 200)
+            self.assertTrue(tres["telemetry"]["connected"])
+
+            # Poll liveSync twice so series records multiple chronological points
+            os1, ob1 = _api(
+                self.base_url,
+                "/api/routers/overview?poll=1&liveSync=1",
+                token=self.admin_token,
+            )
+            self.assertEqual(os1, 200)
+            os2, ob2 = _api(
+                self.base_url,
+                "/api/routers/overview?poll=1",
+                token=self.admin_token,
+            )
+            self.assertEqual(os2, 200)
+
+            summary = ob2["summary"]
+            self.assertGreaterEqual(summary["connectedRouters"], 1)
+            self.assertGreater(summary["totalRxBytes"], 0)
+            self.assertGreater(summary["totalTxBytes"], 0)
+            self.assertEqual(
+                summary["totalBandwidthBytes"],
+                summary["totalRxBytes"] + summary["totalTxBytes"],
+            )
+            self.assertGreaterEqual(len(ob2["bandwidthSeries"]), 2)
+            latest = ob2["bandwidthSeries"][-1]
+            self.assertGreater(latest["rxMb"], 0)
+            self.assertGreater(latest["txMb"], 0)
+            self.assertGreater(latest["totalMb"], 0)
+
+            # Register a separate business tenant and verify isolated zeroed overview
+            sb, bb = _api(
+                self.base_url,
+                "/api/auth/register-business",
+                method="POST",
+                body={
+                    "businessName": "Arusha Fiber",
+                    "ownerName": "Amina",
+                    "ownerEmail": "amina@arushafiber.co.tz",
+                    "password": "ArushaPassword#2026",
+                    "phone": "+255754999111",
+                    "country": "Tanzania",
+                    "region": "Arusha",
+                    "planCode": "STARTER",
+                },
+            )
+            self.assertEqual(sb, 201)
+            iso_s, iso_b = _api(
+                self.base_url,
+                "/api/routers/overview",
+                token=bb["token"],
+            )
+            self.assertEqual(iso_s, 200)
+            self.assertEqual(iso_b["summary"]["totalRouters"], 0)
+            self.assertEqual(iso_b["summary"]["totalBandwidthBytes"], 0)
+            self.assertEqual(iso_b["bandwidthSeries"], [])
+
+            # Ping diagnostic on reachable router returns roundTripMs >= 0
+            ps_ok, pbody_ok = _api(
+                self.base_url,
+                f"/api/routers/{rid}/ping",
+                method="POST",
+                token=self.admin_token,
+            )
+            self.assertEqual(ps_ok, 200)
+            self.assertTrue(pbody_ok["ping"]["reachable"])
+            self.assertIsNotNone(pbody_ok["ping"]["roundTripMs"])
+            self.assertGreaterEqual(pbody_ok["ping"]["roundTripMs"], 0.0)
+            self.assertEqual(pbody_ok["ping"]["method"], "TCP")
+
+            # Cross-tenant ping request must be denied
+            ps_deny, _ = _api(
+                self.base_url,
+                f"/api/routers/{rid}/ping",
+                method="POST",
+                token=bb["token"],
+            )
+            self.assertEqual(ps_deny, 403)
+
+            # Standalone placeholder router without host returns clean unreachable ping response
+            es, ecreated = _api(
+                self.base_url,
+                "/api/routers",
+                method="POST",
+                token=bb["token"],
+                body={
+                    "name": "Standalone Pending Router",
+                    "host": "",
+                    "apiPort": 8728,
+                    "routerOsFamily": "ROUTEROS_V7",
+                },
+            )
+            self.assertEqual(es, 201)
+            ps_empty, pbody_empty = _api(
+                self.base_url,
+                f"/api/routers/{ecreated['router']['id']}/ping",
+                method="POST",
+                token=bb["token"],
+            )
+            self.assertEqual(ps_empty, 200)
+            self.assertFalse(pbody_empty["ping"]["reachable"])
+            self.assertIsNone(pbody_empty["ping"]["roundTripMs"])
+        finally:
+            stop_flag.set()
+            srv_sock.close()
+            t.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

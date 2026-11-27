@@ -215,7 +215,7 @@ async function startServer() {
     }
   });
 
-  await waitForPythonHealth(pythonPort, pythonProc);
+  const pythonReady = waitForPythonHealth(pythonPort, pythonProc);
 
   const httpServer = http.createServer();
   const io = new SocketIOServer(httpServer, {
@@ -231,15 +231,36 @@ async function startServer() {
 
   const app = express();
   app.disable('x-powered-by');
-  app.use(createApiProxyMiddleware(io, pythonPort));
+  const apiProxy = createApiProxyMiddleware(io, pythonPort);
+  app.use((req, res, next) => {
+    if (!req.originalUrl.startsWith('/api')) {
+      next();
+      return;
+    }
+    pythonReady
+      .then(() => apiProxy(req, res, next))
+      .catch((err) => {
+        if (!res.headersSent) {
+          res.status(503).json({
+            error: err instanceof Error ? err.message : 'Python billing engine starting',
+          });
+        }
+      });
+  });
 
   if (!isProduction) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+    const viteReady = import('vite').then(({ createServer: createViteServer }) =>
+      createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      })
+    );
+    app.use((req, res, next) => {
+      viteReady
+        .then((vite) => vite.middlewares(req, res, next))
+        .catch(next);
     });
-    app.use(vite.middlewares);
+    await Promise.all([pythonReady, viteReady]);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
     if (fs.existsSync(distDir)) {
@@ -249,14 +270,20 @@ async function startServer() {
         res.sendFile(path.join(distDir, 'index.html'));
       });
     }
+    await pythonReady;
   }
 
   httpServer.on('request', app);
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(
-      `TRAX LINK Gateway listening on http://0.0.0.0:${PORT} -> Python WiFi Billing Engine on ${PYTHON_API_HOST}:${pythonPort}`
-    );
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once('error', reject);
+    httpServer.listen(PORT, '0.0.0.0', () => {
+      httpServer.off('error', reject);
+      console.log(
+        `TRAX LINK Gateway listening on http://0.0.0.0:${PORT} -> Python WiFi Billing Engine on ${PYTHON_API_HOST}:${pythonPort}`
+      );
+      resolve();
+    });
   });
 }
 

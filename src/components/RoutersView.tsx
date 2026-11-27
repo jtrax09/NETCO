@@ -1,7 +1,42 @@
-import React, { useEffect, useState } from 'react';
-import { Activity, Check, Copy, KeyRound, Plus, RefreshCw, Router as RouterIcon, ShieldAlert, Trash2, Wifi, X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import {
+  Activity,
+  AlertTriangle,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Check,
+  CheckCircle2,
+  Copy,
+  Gauge,
+  KeyRound,
+  Pause,
+  Plus,
+  Radio,
+  RefreshCw,
+  Router as RouterIcon,
+  ShieldAlert,
+  Trash2,
+  Wifi,
+  X,
+} from 'lucide-react';
 import { apiRequest, formatBytes } from '../lib/api.ts';
-import { MobileModal } from './ui/MotionPrimitives.tsx';
+import {
+  evaluateRouterHealth,
+  ROUTER_CPU_WARN_PCT,
+  ROUTER_MEM_WARN_PCT,
+} from '../lib/routerHealth.ts';
+import { MobileModal, NATIVE_SPRING } from './ui/MotionPrimitives.tsx';
 
 interface RouterItem {
   id: string;
@@ -49,6 +84,55 @@ interface SystemModeInfo {
   airtelPocketWifiNotice: string;
 }
 
+interface RouterBandwidthPoint {
+  sampledAt: string;
+  label: string;
+  rxBytes: number;
+  txBytes: number;
+  totalBytes: number;
+  rxMb: number;
+  txMb: number;
+  totalMb: number;
+}
+
+interface RouterBandwidthRow {
+  routerId: string;
+  name: string;
+  status: 'CONNECTED' | 'NOT_CONNECTED' | 'ERROR';
+  rxBytes: number;
+  txBytes: number;
+  totalBytes: number;
+  interfaceCount: number;
+  activeInterfaces: number;
+}
+
+interface RouterBandwidthOverview {
+  summary: {
+    totalRouters: number;
+    connectedRouters: number;
+    offlineRouters: number;
+    totalRxBytes: number;
+    totalTxBytes: number;
+    totalBandwidthBytes: number;
+    totalInterfaces: number;
+    activeInterfaces: number;
+  };
+  perRouterBandwidth: RouterBandwidthRow[];
+  bandwidthSeries: RouterBandwidthPoint[];
+}
+
+interface RouterPingResult {
+  routerId: string;
+  routerName: string;
+  host: string;
+  port: number;
+  reachable: boolean;
+  roundTripMs: number | null;
+  method: string;
+  checkedAt: string;
+  error: string | null;
+}
+
 interface Props {
   token: string;
   refreshTrigger: number;
@@ -60,10 +144,15 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
   const [routers, setRouters] = useState<RouterItem[]>([]);
   const [locations, setLocations] = useState<LocationOption[]>([]);
   const [modeInfo, setModeInfo] = useState<SystemModeInfo | null>(null);
+  const [overview, setOverview] = useState<RouterBandwidthOverview | null>(null);
+  const [livePolling, setLivePolling] = useState(true);
+  const [pollingOverview, setPollingOverview] = useState(false);
   const [switchingMode, setSwitchingMode] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [pingingId, setPingingId] = useState<string | null>(null);
+  const [pingToast, setPingToast] = useState<RouterPingResult | null>(null);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [imgFailed, setImgFailed] = useState(false);
 
@@ -95,14 +184,16 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
   const load = async () => {
     setLoading(true);
     try {
-      const [res, mRes, locRes] = await Promise.all([
+      const [res, mRes, locRes, ovRes] = await Promise.all([
         apiRequest<{ routers: RouterItem[] }>('/api/routers', { token }),
         apiRequest<SystemModeInfo>('/api/system/mode'),
         apiRequest<{ locations: LocationOption[] }>('/api/locations', { token }).catch(() => ({ locations: [] })),
+        apiRequest<RouterBandwidthOverview>('/api/routers/overview', { token }).catch(() => null),
       ]);
       setRouters(res.routers);
       setModeInfo(mRes);
       setLocations(locRes.locations);
+      if (ovRes) setOverview(ovRes);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load routers');
     } finally {
@@ -110,9 +201,58 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     }
   };
 
+  const pollOverview = async (liveSync = false) => {
+    setPollingOverview(true);
+    try {
+      const suffix = liveSync && canManage ? '?poll=1&liveSync=1' : '?poll=1';
+      const ovRes = await apiRequest<RouterBandwidthOverview>(`/api/routers/overview${suffix}`, { token });
+      setOverview(ovRes);
+      if (liveSync) {
+        const res = await apiRequest<{ routers: RouterItem[] }>('/api/routers', { token });
+        setRouters(res.routers);
+      }
+    } catch {
+      // Keep existing overview snapshot visible on transient poll error
+    } finally {
+      setPollingOverview(false);
+    }
+  };
+
   useEffect(() => {
     void load();
   }, [token, refreshTrigger]);
+
+  const connectedCount = useMemo(
+    () => routers.filter((r) => r.status === 'CONNECTED').length,
+    [routers]
+  );
+
+  useEffect(() => {
+    if (!livePolling || connectedCount === 0) return;
+    const timer = window.setInterval(() => {
+      void pollOverview(canManage);
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [livePolling, connectedCount, token, canManage]);
+
+  useEffect(() => {
+    if (!pingToast) return;
+    const timer = window.setTimeout(() => setPingToast(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [pingToast]);
+
+  const healthCounts = useMemo(() => {
+    let healthy = 0;
+    let warning = 0;
+    let critical = 0;
+    for (const r of routers) {
+      const h = evaluateRouterHealth(r);
+      if (h.level === 'HEALTHY') healthy += 1;
+      else if (h.level === 'WARNING') warning += 1;
+      else if (h.level === 'CRITICAL') critical += 1;
+    }
+    return { healthy, warning, critical };
+  }, [routers]);
 
   const handleToggleOperatingMode = async (nextMode: 'STANDALONE_MODE' | 'MIKROTIK_MODE') => {
     setSwitchingMode(true);
@@ -244,6 +384,31 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     }
   };
 
+  const handlePing = async (router: RouterItem) => {
+    setPingingId(router.id);
+    try {
+      const res = await apiRequest<{ ping: RouterPingResult }>(`/api/routers/${router.id}/ping`, {
+        method: 'POST',
+        token,
+      });
+      setPingToast(res.ping);
+    } catch (err) {
+      setPingToast({
+        routerId: router.id,
+        routerName: router.name,
+        host: router.host,
+        port: router.apiPort || 8728,
+        reachable: false,
+        roundTripMs: null,
+        method: router.useTls ? 'TCP_TLS' : 'TCP',
+        checkedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message : 'Ping diagnostic failed',
+      });
+    } finally {
+      setPingingId(null);
+    }
+  };
+
   const handleSyncProfiles = async (id: string) => {
     setSyncMsg(null);
     try {
@@ -368,6 +533,166 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
         </div>
       )}
 
+      {/* Router Overview Dashboard */}
+      <section
+        aria-label="Router Overview"
+        className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-5"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold">Router Overview</h2>
+            <p className="text-xs text-slate-500 dark:text-[#8793A5]">
+              Aggregate live interface bandwidth and operational health across all connected routers.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <button
+              type="button"
+              onClick={() => setLivePolling((p) => !p)}
+              className="btn-secondary min-h-[36px] px-3 py-1.5 text-xs"
+              aria-pressed={livePolling}
+            >
+              {livePolling ? <Radio className="w-3.5 h-3.5 text-emerald-500" /> : <Pause className="w-3.5 h-3.5" />}
+              {livePolling ? 'Live Auto-Poll' : 'Polling Paused'}
+            </button>
+            <button
+              type="button"
+              disabled={pollingOverview}
+              onClick={() => pollOverview(true)}
+              className="btn-secondary min-h-[36px] px-3 py-1.5 text-xs"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${pollingOverview ? 'animate-spin' : ''}`} />
+              {pollingOverview ? 'Sampling...' : 'Refresh Bandwidth'}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 text-xs tabular-nums">
+          <div className="p-4 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10">
+            <span className="text-slate-500 dark:text-[#8793A5] block">Connected Routers</span>
+            <span className="text-xl font-bold font-mono mt-1 block">
+              {overview?.summary.connectedRouters ?? connectedCount} / {overview?.summary.totalRouters ?? routers.length}
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-[#8793A5] mt-1 block">
+              {healthCounts.healthy} healthy · {healthCounts.warning + healthCounts.critical} warnings
+            </span>
+          </div>
+
+          <div className="p-4 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10">
+            <span className="text-slate-500 dark:text-[#8793A5] flex items-center gap-1.5">
+              <ArrowDownToLine className="w-3.5 h-3.5 text-emerald-500" />
+              Total Download (RX)
+            </span>
+            <span className="text-xl font-bold font-mono mt-1 block text-emerald-600 dark:text-emerald-400">
+              {formatBytes(overview?.summary.totalRxBytes ?? 0)}
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-[#8793A5] mt-1 block">
+              Across connected router interfaces
+            </span>
+          </div>
+
+          <div className="p-4 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10">
+            <span className="text-slate-500 dark:text-[#8793A5] flex items-center gap-1.5">
+              <ArrowUpFromLine className="w-3.5 h-3.5 text-sky-500" />
+              Total Upload (TX)
+            </span>
+            <span className="text-xl font-bold font-mono mt-1 block text-sky-600 dark:text-sky-400">
+              {formatBytes(overview?.summary.totalTxBytes ?? 0)}
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-[#8793A5] mt-1 block">
+              Across connected router interfaces
+            </span>
+          </div>
+
+          <div className="p-4 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10">
+            <span className="text-slate-500 dark:text-[#8793A5] block">Combined Bandwidth</span>
+            <span className="text-xl font-bold font-mono mt-1 block text-[#9A7B00] dark:text-[#FFD400]">
+              {formatBytes(overview?.summary.totalBandwidthBytes ?? 0)}
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-[#8793A5] mt-1 block">
+              {overview?.summary.activeInterfaces ?? 0} / {overview?.summary.totalInterfaces ?? 0} active interfaces
+            </span>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-semibold text-slate-900 dark:text-white">
+              Live Connected Router Bandwidth Usage (MB)
+            </span>
+            <span className="font-mono text-[11px] text-slate-500 dark:text-[#8793A5]">
+              {overview?.bandwidthSeries.length
+                ? `${overview.bandwidthSeries.length} telemetry samples`
+                : 'Awaiting connected router telemetry'}
+            </span>
+          </div>
+
+          {!overview || overview.bandwidthSeries.length === 0 ? (
+            <div className="h-56 rounded-lg border border-dashed border-stone-200 dark:border-white/10 flex flex-col items-center justify-center text-center px-4 text-xs text-slate-500 dark:text-[#8793A5] gap-1.5">
+              <Activity className="w-5 h-5 opacity-60" />
+              <p className="font-medium text-slate-700 dark:text-zinc-300">
+                No connected router bandwidth samples recorded yet
+              </p>
+              <p className="max-w-md text-[11px]">
+                Run a connection test on a reachable MikroTik router to stream live RX, TX, and total interface bandwidth telemetry onto this chart.
+              </p>
+            </div>
+          ) : (
+            <div className="h-64 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={overview.bandwidthSeries} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272A" opacity={0.35} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} unit=" MB" />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#161618',
+                      borderColor: '#27272A',
+                      color: '#ffffff',
+                      fontSize: '12px',
+                      borderRadius: '8px',
+                    }}
+                    formatter={(value: unknown, name: unknown) => [
+                      `${Number(value ?? 0).toLocaleString()} MB`,
+                      String(name ?? ''),
+                    ]}
+                  />
+                  <Legend wrapperStyle={{ fontSize: '11px' }} />
+                  <Line
+                    type="monotone"
+                    dataKey="totalMb"
+                    name="Total (MB)"
+                    stroke="#FFD400"
+                    strokeWidth={2.2}
+                    dot={{ r: 2.5 }}
+                    activeDot={{ r: 4.5 }}
+                    isAnimationActive={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="rxMb"
+                    name="Download RX (MB)"
+                    stroke="#10B981"
+                    strokeWidth={1.8}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="txMb"
+                    name="Upload TX (MB)"
+                    stroke="#0EA5E9"
+                    strokeWidth={1.8}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      </section>
+
       {loading ? (
         <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Loading router configuration...</div>
       ) : routers.length === 0 ? (
@@ -425,69 +750,194 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {routers.map((r) => (
-            <div
-              key={r.id}
-              className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-4"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-base font-bold">{r.name}</h3>
-                    <span
-                      className={
-                        r.status === 'CONNECTED'
-                          ? 'text-xs font-mono text-emerald-600 dark:text-emerald-400 font-semibold'
-                          : 'text-xs font-mono text-amber-600 dark:text-amber-400 font-semibold'
-                      }
+          {routers.map((r) => {
+            const health = evaluateRouterHealth(r);
+            const cardBorderClass =
+              health.level === 'CRITICAL'
+                ? 'border-red-400/70 dark:border-red-500/50'
+                : health.level === 'WARNING'
+                ? 'border-amber-400/70 dark:border-amber-500/45'
+                : 'border-stone-200 dark:border-white/10';
+
+            const cpuBarClass =
+              health.cpuState === 'CRITICAL'
+                ? 'bg-red-500'
+                : health.cpuState === 'WARNING'
+                ? 'bg-amber-500'
+                : 'bg-emerald-500';
+
+            const memBarClass =
+              health.memState === 'CRITICAL'
+                ? 'bg-red-500'
+                : health.memState === 'WARNING'
+                ? 'bg-amber-500'
+                : 'bg-emerald-500';
+
+            return (
+              <div
+                key={r.id}
+                className={`p-5 rounded-xl bg-white dark:bg-[#161618] border ${cardBorderClass} space-y-4`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-base font-bold">{r.name}</h3>
+                      <span
+                        className={`inline-flex items-center gap-1.5 text-xs font-mono font-semibold ${
+                          health.level === 'HEALTHY'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : health.level === 'CRITICAL'
+                            ? 'text-red-600 dark:text-red-400'
+                            : health.level === 'WARNING'
+                            ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-slate-500 dark:text-[#8793A5]'
+                        }`}
+                      >
+                        {health.level === 'HEALTHY' && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />}
+                        {health.level === 'WARNING' && <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+                        {health.level === 'CRITICAL' && <ShieldAlert className="w-3.5 h-3.5 shrink-0" />}
+                        {health.level === 'OFFLINE' && <Wifi className="w-3.5 h-3.5 shrink-0" />}
+                        {r.status === 'CONNECTED'
+                          ? `CONNECTED · ${health.label}`
+                          : health.level === 'CRITICAL'
+                          ? health.label
+                          : 'No MikroTik router connected'}
+                      </span>
+                    </div>
+                    <p className="text-xs font-mono text-slate-500 dark:text-[#8793A5] mt-0.5">
+                      {r.host ? `${r.host}:${r.apiPort} ${r.useTls ? 'TLS' : 'TCP'}` : 'Host not configured'}
+                      {r.locationName ? ` · Site: ${r.locationName}` : ''}
+                      {r.routerOsFamily ? ` · ${r.routerOsFamily.replace('ROUTEROS_', 'ROS ')}` : ''}
+                      {r.username ? ` · User: ${r.username}` : ''}
+                      {r.hotspotServer ? ` · Server: ${r.hotspotServer}` : ''}
+                    </p>
+                  </div>
+
+                  {canDelete && (
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(r.id)}
+                      className="btn-chip-danger p-1.5 shrink-0"
+                      title="Remove Router"
+                      aria-label="Remove Router"
                     >
-                      {r.status === 'CONNECTED' ? 'CONNECTED' : 'No MikroTik router connected'}
-                    </span>
-                  </div>
-                  <p className="text-xs font-mono text-slate-500 dark:text-[#8793A5] mt-0.5">
-                    {r.host ? `${r.host}:${r.apiPort} ${r.useTls ? 'TLS' : 'TCP'}` : 'Host not configured'}
-                    {r.locationName ? ` · Site: ${r.locationName}` : ''}
-                    {r.routerOsFamily ? ` · ${r.routerOsFamily.replace('ROUTEROS_', 'ROS ')}` : ''}
-                    {r.username ? ` · User: ${r.username}` : ''}
-                    {r.hotspotServer ? ` · Server: ${r.hotspotServer}` : ''}
-                  </p>
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
 
-                {canDelete && (
-                  <button
-                    type="button"
-                    onClick={() => handleDelete(r.id)}
-                    className="btn-chip-danger p-1.5"
-                    title="Remove Router"
-                    aria-label="Remove Router"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                {r.status === 'CONNECTED' ? (
+                  <div className="space-y-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10 text-xs tabular-nums">
+                      <div>
+                        <div className="flex items-center justify-between text-slate-500 dark:text-[#8793A5]">
+                          <span>CPU Load</span>
+                          <span className="text-[10px] font-mono">Max {ROUTER_CPU_WARN_PCT}%</span>
+                        </div>
+                        <div className="flex items-baseline justify-between mt-0.5">
+                          <span
+                            className={`font-mono font-bold text-sm ${
+                              health.cpuState === 'CRITICAL'
+                                ? 'text-red-600 dark:text-red-400'
+                                : health.cpuState === 'WARNING'
+                                ? 'text-amber-600 dark:text-amber-400'
+                                : ''
+                            }`}
+                          >
+                            {health.cpuPct ?? 0}%
+                          </span>
+                          {health.cpuState !== 'NORMAL' && health.cpuState !== 'UNKNOWN' && (
+                            <span
+                              className={`text-[10px] font-mono font-semibold ${
+                                health.cpuState === 'CRITICAL'
+                                  ? 'text-red-600 dark:text-red-400'
+                                  : 'text-amber-600 dark:text-amber-400'
+                              }`}
+                            >
+                              {health.cpuState}
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-1.5 h-1.5 w-full rounded-full bg-stone-200 dark:bg-zinc-800 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${cpuBarClass}`}
+                            style={{ width: `${health.cpuPct ?? 0}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between text-slate-500 dark:text-[#8793A5]">
+                          <span>Memory</span>
+                          <span className="text-[10px] font-mono">Max {ROUTER_MEM_WARN_PCT}%</span>
+                        </div>
+                        <div className="flex items-baseline justify-between gap-1 mt-0.5">
+                          <span
+                            className={`font-mono font-bold text-sm truncate ${
+                              health.memState === 'CRITICAL'
+                                ? 'text-red-600 dark:text-red-400'
+                                : health.memState === 'WARNING'
+                                ? 'text-amber-600 dark:text-amber-400'
+                                : ''
+                            }`}
+                          >
+                            {health.memPct !== null
+                              ? `${health.memPct}%`
+                              : r.memoryUsedBytes !== null
+                              ? formatBytes(r.memoryUsedBytes)
+                              : '—'}
+                          </span>
+                          {r.memoryUsedBytes !== null && r.memoryTotalBytes !== null && (
+                            <span className="text-[10px] font-mono text-slate-500 dark:text-[#8793A5] shrink-0">
+                              {formatBytes(r.memoryUsedBytes)} / {formatBytes(r.memoryTotalBytes)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-1.5 h-1.5 w-full rounded-full bg-stone-200 dark:bg-zinc-800 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${memBarClass}`}
+                            style={{ width: `${health.memPct ?? 0}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <span className="text-slate-500 dark:text-[#8793A5] block">Uptime</span>
+                        <span className="font-mono font-bold text-sm mt-0.5 block">
+                          {r.uptime || '—'}
+                        </span>
+                        {r.routerOsVersion && (
+                          <span className="text-[10px] font-mono text-slate-500 dark:text-[#8793A5] block mt-1 truncate">
+                            RouterOS {r.routerOsVersion}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {(health.level === 'WARNING' || health.level === 'CRITICAL') && (
+                      <div
+                        role="status"
+                        className={`p-3 rounded-lg border text-xs flex items-start gap-2 ${
+                          health.level === 'CRITICAL'
+                            ? 'border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300'
+                            : 'border-amber-300 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200'
+                        }`}
+                      >
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-semibold">
+                            {health.level === 'CRITICAL' ? 'Critical Resource Threshold Exceeded' : 'Telemetry Warning'}
+                          </p>
+                          <p className="text-[11px] font-mono mt-0.5">{health.summary}</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10 text-xs text-slate-500 dark:text-[#8793A5]">
+                    {r.lastError || 'Standalone Mode active — run a connection test once MikroTik RouterOS hardware is reachable.'}
+                  </div>
                 )}
-              </div>
-
-              {r.status === 'CONNECTED' ? (
-                <div className="grid grid-cols-3 gap-3 p-3 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10 text-xs tabular-nums">
-                  <div>
-                    <span className="text-slate-500 dark:text-[#8793A5] block">CPU Load</span>
-                    <span className="font-mono font-bold text-sm">{r.cpuLoad ?? 0}%</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 dark:text-[#8793A5] block">Memory</span>
-                    <span className="font-mono font-bold text-sm">
-                      {r.memoryUsedBytes !== null ? formatBytes(r.memoryUsedBytes) : '—'}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 dark:text-[#8793A5] block">Uptime</span>
-                    <span className="font-mono font-bold text-sm">{r.uptime || '—'}</span>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-3 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10 text-xs text-slate-500 dark:text-[#8793A5]">
-                  {r.lastError || 'Standalone Mode active — run a connection test once MikroTik RouterOS hardware is reachable.'}
-                </div>
-              )}
 
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs">
                 <div className="flex items-center gap-2">
@@ -525,6 +975,17 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                   )}
                   <button
                     type="button"
+                    disabled={pingingId === r.id}
+                    onClick={() => handlePing(r)}
+                    title="Run diagnostic ping test"
+                    aria-label={`Ping ${r.name}`}
+                    className="btn-chip-neutral"
+                  >
+                    <Gauge className={`w-3.5 h-3.5 ${pingingId === r.id ? 'animate-spin' : ''}`} />
+                    {pingingId === r.id ? 'Pinging...' : 'Ping'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => handleViewInterfaces(r)}
                     className="btn-chip-accent"
                   >
@@ -543,7 +1004,8 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -790,6 +1252,64 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
           </>
         )}
       </MobileModal>
+
+      <AnimatePresence>
+        {pingToast && (
+          <motion.div
+            key={pingToast.checkedAt + pingToast.routerId}
+            initial={{ opacity: 0, y: 16, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.96 }}
+            transition={NATIVE_SPRING}
+            role="status"
+            aria-live="polite"
+            className={`no-print fixed bottom-5 right-5 z-50 w-[min(92vw,22rem)] rounded-xl border px-3.5 py-2.5 shadow-lg bg-white dark:bg-[#161618] ${
+              pingToast.reachable
+                ? 'border-emerald-500/40'
+                : 'border-amber-500/45'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2.5">
+              <div className="flex items-start gap-2.5 min-w-0">
+                <div
+                  className={`mt-0.5 p-1.5 rounded-lg shrink-0 ${
+                    pingToast.reachable
+                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                      : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                  }`}
+                >
+                  <Gauge className="w-4 h-4" />
+                </div>
+                <div className="min-w-0 text-xs">
+                  <p className="font-semibold text-slate-900 dark:text-white truncate">
+                    {pingToast.reachable ? `Ping OK · ${pingToast.routerName}` : `Ping Unreachable · ${pingToast.routerName}`}
+                  </p>
+                  {pingToast.reachable && pingToast.roundTripMs !== null ? (
+                    <p className="font-mono tabular-nums text-emerald-600 dark:text-emerald-400 font-bold mt-0.5">
+                      RTT {pingToast.roundTripMs.toFixed(2)} ms
+                      <span className="font-normal text-slate-500 dark:text-[#8793A5] ml-1.5">
+                        ({pingToast.host}:{pingToast.port})
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-slate-500 dark:text-[#8793A5] mt-0.5 break-words">
+                      {pingToast.error || 'Target host did not respond'}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPingToast(null)}
+                aria-label="Dismiss ping status"
+                className="btn-icon min-h-[26px] min-w-[26px] p-1 shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

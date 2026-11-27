@@ -16,6 +16,7 @@ import {
   Moon,
   Package,
   Router,
+  Settings,
   Shield,
   Sun,
   Ticket,
@@ -40,6 +41,7 @@ import { RoutersView } from './components/RoutersView.tsx';
 import { ReportsView } from './components/ReportsView.tsx';
 import { NotificationsView } from './components/NotificationsView.tsx';
 import { StaffAuditView } from './components/StaffAuditView.tsx';
+import { SettingsView } from './components/SettingsView.tsx';
 import {
   LiquidGlassExpandableSidebar,
   type GlassNavGroup,
@@ -63,7 +65,8 @@ type AdminSection =
   | 'routers'
   | 'reports'
   | 'notifications'
-  | 'staff';
+  | 'staff'
+  | 'settings';
 
 const VALID_SECTIONS = new Set<AdminSection>([
   'superadmin',
@@ -79,6 +82,7 @@ const VALID_SECTIONS = new Set<AdminSection>([
   'reports',
   'notifications',
   'staff',
+  'settings',
 ]);
 
 function TraxLinkWorkspace() {
@@ -309,7 +313,10 @@ function TraxLinkWorkspace() {
       items: [
         { id: 'notifications', label: tAdmin.sections.notifications, href: '#notifications', icon: <Bell /> },
         ...(isBusinessManager
-          ? [{ id: 'staff', label: tAdmin.shortSections.staff, href: '#staff', icon: <Shield /> }]
+          ? [
+              { id: 'staff', label: tAdmin.shortSections.staff, href: '#staff', icon: <Shield /> },
+              { id: 'settings', label: tAdmin.shortSections.settings, href: '#settings', icon: <Settings /> },
+            ]
           : []),
       ],
     },
@@ -532,6 +539,14 @@ function TraxLinkWorkspace() {
                 <NotificationsView token={token} refreshTrigger={refreshTrigger} />
               )}
               {section === 'staff' && <StaffAuditView token={token} currentRole={user.role} />}
+              {section === 'settings' && isBusinessManager && (
+                <SettingsView
+                  token={token}
+                  userRole={user.role}
+                  refreshTrigger={refreshTrigger}
+                  onSaved={() => setRefreshTrigger((n) => n + 1)}
+                />
+              )}
             </MobilePageTransition>
           </AnimatePresence>
         </main>

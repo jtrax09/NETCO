@@ -59,7 +59,10 @@ from .services.billing import (
 )
 from .services.mikrotik import (
     generate_mikrotik_wireguard_snippet,
+    get_routers_bandwidth_overview,
+    ping_router_host,
     push_hotspot_profile_to_router,
+    record_connected_routers_bandwidth_sample,
     sync_router_telemetry,
     terminate_router_session,
 )
@@ -1589,6 +1592,141 @@ def make_handler_class(
                     )
                     return self._send_json(201, {"ok": True, "reference": ref, "amountTzs": amt, "planCode": plan_code.upper()})
 
+                if method == "GET" and path == "/api/business/settings":
+                    actor = self._require_auth(ALL_BUSINESS_ROLES)
+                    if not actor:
+                        return
+                    biz_id = self._resolve_scope(actor, qs, None, path)
+                    if not biz_id:
+                        return
+                    business = db.query_one(
+                        """
+                        SELECT id, name, slug, email, phone, country, currency, status, timezone,
+                               hotspot_title as hotspotTitle, hotspot_support_phone as hotspotSupportPhone,
+                               created_at as createdAt, updated_at as updatedAt
+                        FROM businesses WHERE id = ?
+                        """,
+                        (biz_id,),
+                    )
+                    if not business:
+                        return self._send_json(404, {"error": "Business workspace not found"})
+                    plan = db.query_one(
+                        """
+                        SELECT p.code as planCode, p.name as planName, p.max_routers as maxRouters,
+                               p.max_locations as maxLocations, p.max_active_customers as maxActiveCustomers,
+                               ss.status as subscriptionStatus
+                        FROM saas_subscriptions ss
+                        JOIN saas_plans p ON p.id = ss.plan_id
+                        WHERE ss.business_id = ?
+                        ORDER BY ss.created_at DESC LIMIT 1
+                        """,
+                        (biz_id,),
+                    )
+                    usage_counts = {
+                        "routers": int(
+                            (db.query_one("SELECT COUNT(*) as c FROM routers WHERE business_id = ?", (biz_id,)) or {"c": 0})["c"]
+                        ),
+                        "locations": int(
+                            (db.query_one("SELECT COUNT(*) as c FROM locations WHERE business_id = ?", (biz_id,)) or {"c": 0})["c"]
+                        ),
+                        "customers": int(
+                            (db.query_one("SELECT COUNT(*) as c FROM customers WHERE business_id = ?", (biz_id,)) or {"c": 0})["c"]
+                        ),
+                    }
+                    return self._send_json(
+                        200,
+                        {
+                            "settings": business,
+                            "operatingMode": get_operating_mode(db),
+                            "plan": plan,
+                            "usage": usage_counts,
+                        },
+                    )
+
+                if method == "PATCH" and path == "/api/business/settings":
+                    actor = self._require_auth(BUSINESS_MANAGEMENT_ROLES)
+                    if not actor:
+                        return
+                    body, _, err = self._read_json()
+                    if err or body is None:
+                        return self._send_json(err[0], {"error": err[1]})
+                    biz_id = self._resolve_scope(actor, qs, body, path)
+                    if not biz_id:
+                        return
+                    existing = db.query_one("SELECT * FROM businesses WHERE id = ?", (biz_id,))
+                    if not existing:
+                        return self._send_json(404, {"error": "Business workspace not found"})
+
+                    b_name = clean_str(body.get("name"), 2, 80) if "name" in body else str(existing["name"])
+                    b_email = clean_str(body.get("email"), 4, 120) if "email" in body else str(existing["email"])
+                    b_phone = clean_str(body.get("phone"), 6, 24) if "phone" in body else str(existing["phone"])
+                    b_country = clean_str(body.get("country"), 2, 56) if "country" in body else str(existing["country"])
+                    b_currency = (
+                        clean_enum(body.get("currency"), {"TZS", "USD", "KES", "UGX"})
+                        if "currency" in body
+                        else str(existing["currency"])
+                    )
+                    b_timezone = (
+                        clean_str(body.get("timezone"), 3, 64)
+                        if "timezone" in body
+                        else str(existing["timezone"])
+                    )
+                    b_hotspot_title = (
+                        clean_opt_str(body.get("hotspotTitle"), 80)
+                        if "hotspotTitle" in body
+                        else existing.get("hotspot_title")
+                    )
+                    b_support_phone = (
+                        clean_opt_str(body.get("hotspotSupportPhone"), 24)
+                        if "hotspotSupportPhone" in body
+                        else existing.get("hotspot_support_phone")
+                    )
+
+                    if not b_name or not b_email or not is_valid_email(b_email) or not b_phone or not b_country or not b_currency or not b_timezone:
+                        return self._send_json(400, {"error": "Invalid business settings fields"})
+
+                    now_iso = utc_now_iso()
+                    db.execute(
+                        """
+                        UPDATE businesses
+                        SET name = ?, email = ?, phone = ?, country = ?, currency = ?, timezone = ?,
+                            hotspot_title = ?, hotspot_support_phone = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            b_name,
+                            b_email.lower(),
+                            b_phone,
+                            b_country,
+                            b_currency,
+                            b_timezone,
+                            b_hotspot_title,
+                            b_support_phone,
+                            now_iso,
+                            biz_id,
+                        ),
+                    )
+                    updated = db.query_one(
+                        """
+                        SELECT id, name, slug, email, phone, country, currency, status, timezone,
+                               hotspot_title as hotspotTitle, hotspot_support_phone as hotspotSupportPhone,
+                               created_at as createdAt, updated_at as updatedAt
+                        FROM businesses WHERE id = ?
+                        """,
+                        (biz_id,),
+                    )
+                    record_audit_log(
+                        db,
+                        actor,
+                        "BUSINESS_SETTINGS_UPDATED",
+                        "Business",
+                        biz_id,
+                        ip,
+                        {"name": b_name, "currency": b_currency, "hotspotTitle": b_hotspot_title},
+                    )
+                    self._emit(events, "business:updated", {"businessId": biz_id, "name": b_name})
+                    return self._send_json(200, {"settings": updated}, events)
+
                 if method == "GET" and path == "/api/locations":
                     actor = self._require_auth(ALL_BUSINESS_ROLES)
                     if not actor:
@@ -2622,6 +2760,75 @@ def make_handler_class(
                     self._emit(events, "payment:updated", {"reference": pay["reference"], "status": "REFUNDED", "businessId": biz_id})
                     return self._send_json(200, {"ok": True}, events)
 
+                m = re.fullmatch(r"/api/payments/([^/]+)/reconcile", path)
+                if method == "POST" and m:
+                    actor = self._require_auth(BUSINESS_MANAGEMENT_ROLES + ("ACCOUNTANT",))
+                    if not actor:
+                        return
+                    body, _, err = self._read_json()
+                    if err or body is None:
+                        return self._send_json(err[0], {"error": err[1]})
+                    biz_id = self._resolve_scope(actor, qs, body, path)
+                    if not biz_id:
+                        return
+                    pid = urllib.parse.unquote(m.group(1))
+                    pay = db.query_one("SELECT * FROM payments WHERE id = ?", (pid,))
+                    if not pay:
+                        return self._send_json(404, {"error": "Payment not found"})
+                    if str(pay["business_id"]) != biz_id:
+                        return self._send_json(403, {"error": "Cross-tenant access denied"})
+                    if pay["status"] != "PENDING":
+                        return self._send_json(400, {"error": "Only PENDING payments can be reconciled"})
+
+                    ext_tx = clean_str(body.get("externalTxId"), 4, 128)
+                    note = clean_opt_str(body.get("note"), 240)
+                    if not ext_tx:
+                        return self._send_json(400, {"error": "Verified External Transaction ID (min 4 chars) is required"})
+
+                    try:
+                        outcome = process_verified_payment_callback(
+                            db,
+                            provider=str(pay["provider"]),
+                            external_event_id=f"RECONCILE-{pay['id']}-{ext_tx}",
+                            reference=str(pay["reference"]),
+                            external_tx_id=ext_tx,
+                            status="COMPLETED",
+                            raw_payload={
+                                "source": "MANUAL_RECONCILIATION",
+                                "reconciledBy": actor.email,
+                                "externalTxId": ext_tx,
+                                "note": note,
+                            },
+                            amount_tzs=int(pay["amount_tzs"]),
+                        )
+                        record_audit_log(
+                            db,
+                            actor,
+                            "PAYMENT_RECONCILED",
+                            "Payment",
+                            pid,
+                            ip,
+                            {
+                                "reference": pay["reference"],
+                                "externalTxId": ext_tx,
+                                "receiptNumber": outcome.get("receiptNumber"),
+                            },
+                        )
+                        self._emit(
+                            events,
+                            "payment:updated",
+                            {
+                                "reference": outcome["reference"],
+                                "businessId": biz_id,
+                                "status": outcome["status"],
+                                "receiptNumber": outcome.get("receiptNumber"),
+                            },
+                        )
+                        self._emit(events, "voucher:updated", {"source": "reconciliation", "reference": outcome["reference"]})
+                        return self._send_json(200, {"ok": True, "outcome": outcome}, events)
+                    except ValueError as exc:
+                        return self._send_json(400, {"error": str(exc)})
+
                 if method == "GET" and path == "/api/invoices":
                     actor = self._require_auth(FINANCE_ROLES)
                     if not actor:
@@ -2664,6 +2871,27 @@ def make_handler_class(
                 # ---------------------------------------------------------------
                 # MIKROTIK ROUTERS
                 # ---------------------------------------------------------------
+                if method == "GET" and path == "/api/routers/overview":
+                    actor = self._require_auth(ALL_BUSINESS_ROLES)
+                    if not actor:
+                        return
+                    biz_id = self._resolve_scope(actor, qs, None, path)
+                    if not biz_id:
+                        return
+                    if qs.get("poll") == "1":
+                        connected = db.query_all(
+                            "SELECT id FROM routers WHERE business_id = ? AND status = 'CONNECTED'",
+                            (biz_id,),
+                        )
+                        if connected:
+                            if qs.get("liveSync") == "1" and actor.role in NETWORK_ROLES:
+                                for cr in connected:
+                                    sync_router_telemetry(db, str(cr["id"]))
+                            else:
+                                record_connected_routers_bandwidth_sample(db, biz_id)
+                    overview = get_routers_bandwidth_overview(db, biz_id)
+                    return self._send_json(200, overview)
+
                 if method == "GET" and path == "/api/routers":
                     actor = self._require_auth(ALL_BUSINESS_ROLES)
                     if not actor:
@@ -2764,6 +2992,32 @@ def make_handler_class(
                     record_audit_log(db, actor, "ROUTER_CONNECTION_TEST", "Router", rid, ip, {"connected": telemetry.connected, "error": telemetry.error})
                     self._emit(events, "router:status", {"routerId": rid, "connected": telemetry.connected, "businessId": biz_id})
                     return self._send_json(200, {"router": updated, "telemetry": telemetry.to_dict()}, events)
+
+                m = re.fullmatch(r"/api/routers/([^/]+)/ping", path)
+                if method == "POST" and m:
+                    actor = self._require_auth(ALL_BUSINESS_ROLES)
+                    if not actor:
+                        return
+                    biz_id = self._resolve_scope(actor, qs, None, path)
+                    if not biz_id:
+                        return
+                    rid = urllib.parse.unquote(m.group(1))
+                    rrow = db.query_one("SELECT id, business_id FROM routers WHERE id = ?", (rid,))
+                    if not rrow:
+                        return self._send_json(404, {"error": "Router not found"})
+                    if str(rrow["business_id"]) != biz_id:
+                        return self._send_json(403, {"error": "Cross-tenant access denied"})
+                    ping_res = ping_router_host(db, rid)
+                    record_audit_log(
+                        db,
+                        actor,
+                        "ROUTER_PING_DIAGNOSTIC",
+                        "Router",
+                        rid,
+                        ip,
+                        {"reachable": ping_res["reachable"], "roundTripMs": ping_res["roundTripMs"]},
+                    )
+                    return self._send_json(200, {"ping": ping_res})
 
                 m = re.fullmatch(r"/api/routers/([^/]+)/interfaces", path)
                 if method == "GET" and m:

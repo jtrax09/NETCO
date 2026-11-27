@@ -8,7 +8,9 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from 'recharts';
+import { AlertTriangle, CheckCircle2, ShieldAlert } from 'lucide-react';
 import { apiRequest, formatBytes, formatTzs } from '../lib/api.ts';
+import { evaluateRouterHealth } from '../lib/routerHealth.ts';
 
 interface DashboardSummary {
   operatingMode?: 'STANDALONE_MODE' | 'MIKROTIK_MODE';
@@ -271,30 +273,51 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
             </div>
           ) : (
             <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {routers.map((r) => (
-                <div key={r.id} className="py-3 flex items-center justify-between gap-4 text-xs">
-                  <div>
-                    <p className="font-semibold text-sm">{r.name}</p>
-                    <p className="text-slate-500 dark:text-[#8793A5] font-mono">
-                      {r.host}:{r.apiPort} · {r.status === 'CONNECTED' ? r.uptime || 'Online' : r.lastError || 'NOT CONNECTED'}
-                    </p>
+              {routers.map((r) => {
+                const health = evaluateRouterHealth({
+                  status: (r.status as 'CONNECTED' | 'NOT_CONNECTED' | 'ERROR') || 'NOT_CONNECTED',
+                  cpuLoad: r.cpuLoad,
+                  memoryUsedBytes: r.memoryUsedBytes,
+                  memoryTotalBytes: r.memoryTotalBytes,
+                  lastError: r.lastError,
+                });
+                return (
+                  <div key={r.id} className="py-3 flex items-center justify-between gap-4 text-xs">
+                    <div>
+                      <p className="font-semibold text-sm">{r.name}</p>
+                      <p className="text-slate-500 dark:text-[#8793A5] font-mono">
+                        {r.host ? `${r.host}:${r.apiPort}` : 'Host not configured'} ·{' '}
+                        {r.status === 'CONNECTED' ? r.uptime || 'Online' : r.lastError || 'NOT CONNECTED'}
+                      </p>
+                    </div>
+                    <div className="text-right tabular-nums">
+                      <p
+                        className={`inline-flex items-center justify-end gap-1 font-semibold ${
+                          health.level === 'HEALTHY'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : health.level === 'CRITICAL'
+                            ? 'text-red-600 dark:text-red-400'
+                            : health.level === 'WARNING'
+                            ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-slate-500 dark:text-[#8793A5]'
+                        }`}
+                      >
+                        {health.level === 'HEALTHY' && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />}
+                        {health.level === 'WARNING' && <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+                        {health.level === 'CRITICAL' && <ShieldAlert className="w-3.5 h-3.5 shrink-0" />}
+                        <span>{r.status === 'CONNECTED' ? health.label : 'NOT CONNECTED'}</span>
+                      </p>
+                      {r.status === 'CONNECTED' && (health.cpuPct !== null || health.memPct !== null) && (
+                        <p className="text-slate-500 dark:text-[#8793A5] font-mono">
+                          {health.cpuPct !== null ? `CPU ${health.cpuPct}%` : ''}
+                          {health.cpuPct !== null && health.memPct !== null ? ' · ' : ''}
+                          {health.memPct !== null ? `RAM ${health.memPct}%` : ''}
+                        </p>
+                      )}
+                    </div>
                   </div>
-                  <div className="text-right tabular-nums">
-                    <p
-                      className={
-                        r.status === 'CONNECTED'
-                          ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
-                          : 'text-amber-600 dark:text-amber-400 font-semibold'
-                      }
-                    >
-                      {r.status === 'CONNECTED' ? 'CONNECTED' : 'NOT CONNECTED'}
-                    </p>
-                    {r.status === 'CONNECTED' && r.cpuLoad !== null && (
-                      <p className="text-slate-500 dark:text-[#8793A5]">CPU {r.cpuLoad}%</p>
-                    )}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

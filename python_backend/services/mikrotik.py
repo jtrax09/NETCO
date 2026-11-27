@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import re
 import socket
 import ssl
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -299,6 +302,9 @@ def sync_router_telemetry(db: DatabaseManager, router_id: str) -> RouterTelemetr
                 ),
             )
 
+    if result.connected:
+        record_connected_routers_bandwidth_sample(db, str(row["business_id"]), now_iso)
+
     if prev_status != next_status:
         db.execute(
             """
@@ -321,6 +327,229 @@ def sync_router_telemetry(db: DatabaseManager, router_id: str) -> RouterTelemetr
         )
 
     return result
+
+
+def record_connected_routers_bandwidth_sample(
+    db: DatabaseManager,
+    business_id: str,
+    recorded_at: str | None = None,
+) -> dict[str, int]:
+    """Compute aggregate RX/TX bytes across all CONNECTED routers and record a timestamped sample."""
+    agg = db.query_one(
+        """
+        SELECT COALESCE(SUM(ri.rx_bytes), 0) as rxBytes,
+               COALESCE(SUM(ri.tx_bytes), 0) as txBytes
+        FROM router_interfaces ri
+        JOIN routers r ON r.id = ri.router_id
+        WHERE r.business_id = ? AND r.status = 'CONNECTED'
+        """,
+        (business_id,),
+    )
+    rx_bytes = int((agg or {}).get("rxBytes") or 0)
+    tx_bytes = int((agg or {}).get("txBytes") or 0)
+    ts = recorded_at or utc_now_iso()
+
+    db.execute(
+        """
+        INSERT INTO network_usage (id, business_id, router_id, session_id, rx_bytes, tx_bytes, recorded_at)
+        VALUES (?, ?, NULL, NULL, ?, ?, ?)
+        """,
+        (generate_id("nug"), business_id, rx_bytes, tx_bytes, ts),
+    )
+    db.execute(
+        """
+        DELETE FROM network_usage
+        WHERE business_id = ? AND router_id IS NULL
+          AND id NOT IN (
+            SELECT id FROM network_usage
+            WHERE business_id = ? AND router_id IS NULL
+            ORDER BY recorded_at DESC
+            LIMIT 120
+          )
+        """,
+        (business_id, business_id),
+    )
+    return {"rxBytes": rx_bytes, "txBytes": tx_bytes}
+
+
+def get_routers_bandwidth_overview(db: DatabaseManager, business_id: str) -> dict[str, Any]:
+    """Return total connected-router bandwidth summary, per-router breakdown, and live line series."""
+    routers = db.query_all(
+        """
+        SELECT r.id, r.name, r.status, r.host, r.api_port as apiPort,
+               r.cpu_load as cpuLoad, r.memory_used_bytes as memoryUsedBytes,
+               r.memory_total_bytes as memoryTotalBytes,
+               COALESCE(SUM(ri.rx_bytes), 0) as rxBytes,
+               COALESCE(SUM(ri.tx_bytes), 0) as txBytes,
+               COUNT(ri.id) as interfaceCount,
+               COALESCE(SUM(CASE WHEN ri.running = 1 AND ri.disabled = 0 THEN 1 ELSE 0 END), 0) as activeInterfaces
+        FROM routers r
+        LEFT JOIN router_interfaces ri ON ri.router_id = r.id
+        WHERE r.business_id = ?
+        GROUP BY r.id
+        ORDER BY r.created_at DESC
+        """,
+        (business_id,),
+    )
+
+    connected_rows = [r for r in routers if str(r.get("status")) == "CONNECTED"]
+    total_rx = sum(int(r.get("rxBytes") or 0) for r in connected_rows)
+    total_tx = sum(int(r.get("txBytes") or 0) for r in connected_rows)
+    total_interfaces = sum(int(r.get("interfaceCount") or 0) for r in connected_rows)
+    active_interfaces = sum(int(r.get("activeInterfaces") or 0) for r in connected_rows)
+
+    raw_series = db.query_all(
+        """
+        SELECT rx_bytes as rxBytes, tx_bytes as txBytes, recorded_at as sampledAt
+        FROM network_usage
+        WHERE business_id = ? AND router_id IS NULL
+        ORDER BY recorded_at DESC
+        LIMIT 24
+        """,
+        (business_id,),
+    )
+    raw_series.reverse()
+
+    series: list[dict[str, Any]] = []
+    for pt in raw_series:
+        rx_b = int(pt.get("rxBytes") or 0)
+        tx_b = int(pt.get("txBytes") or 0)
+        tot_b = rx_b + tx_b
+        sampled_at = str(pt.get("sampledAt") or "")
+        label = sampled_at[11:19] if len(sampled_at) >= 19 else sampled_at
+        series.append(
+            {
+                "sampledAt": sampled_at,
+                "label": label,
+                "rxBytes": rx_b,
+                "txBytes": tx_b,
+                "totalBytes": tot_b,
+                "rxMb": round(rx_b / (1024 * 1024), 2),
+                "txMb": round(tx_b / (1024 * 1024), 2),
+                "totalMb": round(tot_b / (1024 * 1024), 2),
+            }
+        )
+
+    per_router = [
+        {
+            "routerId": str(r["id"]),
+            "name": str(r["name"]),
+            "status": str(r["status"]),
+            "rxBytes": int(r.get("rxBytes") or 0),
+            "txBytes": int(r.get("txBytes") or 0),
+            "totalBytes": int(r.get("rxBytes") or 0) + int(r.get("txBytes") or 0),
+            "interfaceCount": int(r.get("interfaceCount") or 0),
+            "activeInterfaces": int(r.get("activeInterfaces") or 0),
+        }
+        for r in routers
+    ]
+
+    return {
+        "summary": {
+            "totalRouters": len(routers),
+            "connectedRouters": len(connected_rows),
+            "offlineRouters": len(routers) - len(connected_rows),
+            "totalRxBytes": total_rx,
+            "totalTxBytes": total_tx,
+            "totalBandwidthBytes": total_rx + total_tx,
+            "totalInterfaces": total_interfaces,
+            "activeInterfaces": active_interfaces,
+        },
+        "perRouterBandwidth": per_router,
+        "bandwidthSeries": series,
+    }
+
+
+_SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9._:-]{1,255}$")
+
+
+def _is_disallowed_probe_host(host: str) -> str | None:
+    if not host or not _SAFE_HOST_RE.fullmatch(host):
+        return "Invalid router host format."
+    if host == "8.8.8.8":
+        return "8.8.8.8 is a public DNS IP and cannot be probed as a MikroTik router."
+    try:
+        ip_obj = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
+        return "Link-local, multicast, or unspecified addresses cannot be probed."
+    return None
+
+
+def ping_router_host(db: DatabaseManager, router_id: str, timeout: float = 2.5) -> dict[str, Any]:
+    """Measure TCP/TLS handshake round-trip time (ms) to a configured router endpoint."""
+    row = db.query_one(
+        "SELECT id, business_id, name, host, api_port, use_tls FROM routers WHERE id = ?",
+        (router_id,),
+    )
+    if not row:
+        raise ValueError("Router not found")
+
+    host = str(row.get("host") or "").strip()
+    port = int(row.get("api_port") or 8728)
+    use_tls = bool(row.get("use_tls"))
+    checked_at = utc_now_iso()
+    method = "TCP_TLS" if use_tls else "TCP"
+
+    base = {
+        "routerId": str(row["id"]),
+        "routerName": str(row["name"]),
+        "host": host,
+        "port": port,
+        "method": method,
+        "checkedAt": checked_at,
+    }
+
+    if not host:
+        return {
+            **base,
+            "reachable": False,
+            "roundTripMs": None,
+            "error": "Host IP not configured for this router (Standalone Mode).",
+        }
+
+    disallowed_reason = _is_disallowed_probe_host(host)
+    if disallowed_reason:
+        return {
+            **base,
+            "reachable": False,
+            "roundTripMs": None,
+            "error": disallowed_reason,
+        }
+
+    sock: socket.socket | ssl.SSLSocket | None = None
+    started = time.perf_counter()
+    try:
+        raw_sock = socket.create_connection((host, port), timeout=timeout)
+        raw_sock.settimeout(timeout)
+        if use_tls:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+        else:
+            sock = raw_sock
+        rtt_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        return {
+            **base,
+            "reachable": True,
+            "roundTripMs": rtt_ms,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            **base,
+            "reachable": False,
+            "roundTripMs": None,
+            "error": str(exc) or f"Router {host}:{port} unreachable",
+        }
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def push_hotspot_profile_to_router(

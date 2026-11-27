@@ -252,6 +252,7 @@ export const TRANSLATIONS = {
         reports: 'Reports & Analytics',
         notifications: 'Notifications',
         staff: 'Staff & Audit Logs',
+        settings: 'Business Settings',
       },
       shortSections: {
         superadmin: 'Super Admin',
@@ -259,6 +260,7 @@ export const TRANSLATIONS = {
         locations: 'Locations',
         reports: 'Reports',
         staff: 'Staff & Audit',
+        settings: 'Settings',
       },
       live: 'Live',
       connecting: 'Connecting',
@@ -478,6 +480,7 @@ export const TRANSLATIONS = {
         reports: 'Ripoti & Takwimu',
         notifications: 'Arifa',
         staff: 'Wahudumu & Ukaguzi',
+        settings: 'Mipangilio ya Biashara',
       },
       shortSections: {
         superadmin: 'Super Admin',
@@ -485,6 +488,7 @@ export const TRANSLATIONS = {
         locations: 'Maeneo',
         reports: 'Ripoti',
         staff: 'Wahudumu',
+        settings: 'Mipangilio',
       },
       live: 'Mubashara',
       connecting: 'Inaunganisha',

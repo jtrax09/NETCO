@@ -1593,6 +1593,7 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
         <footer className="pt-4 border-t border-black/[0.06] dark:border-white/[0.07] flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-500">
           <span>
             {currentBusiness?.name || 'TRAX LINK'} · CONNECT. MANAGE. GROW.
+            {currentBusiness?.hotspotSupportPhone ? ` · Support: ${currentBusiness.hotspotSupportPhone}` : ''}
           </span>
           <button
             type="button"
