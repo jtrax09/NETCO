@@ -33,6 +33,7 @@ export function PackagesView({ token, canManage }: Props) {
   const [packages, setPackages] = useState<PackageItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [profileSyncMsg, setProfileSyncMsg] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -135,12 +136,18 @@ export function PackagesView({ token, canManage }: Props) {
         validityDays: Number(validityDays),
       };
       const res = editing
-        ? await apiRequest<{ package: PackageItem }>(`/api/packages/${editing.id}`, {
+        ? await apiRequest<{
+            package: PackageItem;
+            profileSync?: { enabled: boolean; synced: number; failed: number; skipped: number };
+          }>(`/api/packages/${editing.id}`, {
             method: 'PATCH',
             token,
             body,
           })
-        : await apiRequest<{ package: PackageItem }>('/api/packages', {
+        : await apiRequest<{
+            package: PackageItem;
+            profileSync?: { enabled: boolean; synced: number; failed: number; skipped: number };
+          }>('/api/packages', {
             method: 'POST',
             token,
             body,
@@ -150,6 +157,15 @@ export function PackagesView({ token, canManage }: Props) {
         ...res.package,
         isActive: Boolean(res.package.isActive),
       });
+      if (res.profileSync?.enabled) {
+        setProfileSyncMsg(
+          res.profileSync.synced + res.profileSync.failed > 0
+            ? `MikroTik auto-sync: ${res.profileSync.synced} router(s) synced, ${res.profileSync.failed} failed.`
+            : 'MikroTik auto-sync is enabled (no configured MikroTik routers to push yet).'
+        );
+      } else {
+        setProfileSyncMsg(null);
+      }
       setModalOpen(false);
       await load();
     } catch (err) {
@@ -161,7 +177,10 @@ export function PackagesView({ token, canManage }: Props) {
 
   const handleToggle = async (pkg: PackageItem) => {
     try {
-      const res = await apiRequest<{ package: PackageItem }>(`/api/packages/${pkg.id}`, {
+      const res = await apiRequest<{
+        package: PackageItem;
+        profileSync?: { enabled: boolean; synced: number; failed: number; skipped: number };
+      }>(`/api/packages/${pkg.id}`, {
         method: 'PATCH',
         token,
         body: { isActive: !pkg.isActive },
@@ -170,6 +189,11 @@ export function PackagesView({ token, canManage }: Props) {
         ...res.package,
         isActive: Boolean(res.package.isActive),
       });
+      if (res.profileSync?.enabled && res.profileSync.synced + res.profileSync.failed > 0) {
+        setProfileSyncMsg(
+          `MikroTik auto-sync: ${res.profileSync.synced} router(s) synced, ${res.profileSync.failed} failed.`
+        );
+      }
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to update package status');
@@ -209,6 +233,12 @@ export function PackagesView({ token, canManage }: Props) {
       {error && (
         <div className="p-3 rounded-lg border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300">
           {error}
+        </div>
+      )}
+
+      {profileSyncMsg && (
+        <div className="p-3 rounded-lg border border-emerald-300 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/30 text-xs font-mono text-emerald-700 dark:text-emerald-300">
+          {profileSyncMsg}
         </div>
       )}
 

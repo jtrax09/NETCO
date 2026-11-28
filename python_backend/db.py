@@ -137,6 +137,15 @@ class DatabaseManager:
                   timezone TEXT NOT NULL DEFAULT 'Africa/Dar_es_Salaam',
                   hotspot_title TEXT,
                   hotspot_support_phone TEXT,
+                  description TEXT,
+                  physical_address TEXT,
+                  city TEXT,
+                  website_url TEXT,
+                  support_hours TEXT,
+                  wifi_ssid TEXT,
+                  wifi_gateway_ip TEXT,
+                  wifi_gateway_type TEXT,
+                  auto_sync_profiles INTEGER NOT NULL DEFAULT 0,
                   created_at TEXT NOT NULL DEFAULT (datetime('now')),
                   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
@@ -565,6 +574,18 @@ class DatabaseManager:
                   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
+                CREATE TABLE IF NOT EXISTS router_telemetry_history (
+                  id TEXT PRIMARY KEY,
+                  business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+                  router_id TEXT NOT NULL REFERENCES routers(id) ON DELETE CASCADE,
+                  cpu_load INTEGER,
+                  memory_used_bytes INTEGER,
+                  memory_total_bytes INTEGER,
+                  memory_pct REAL,
+                  active_hotspot_count INTEGER NOT NULL DEFAULT 0,
+                  recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                   id TEXT PRIMARY KEY,
                   applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -592,6 +613,7 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_prov_jobs_due ON provisioning_jobs(status, next_retry_at);
                 CREATE INDEX IF NOT EXISTS idx_radcheck_user ON radcheck(username, is_active);
                 CREATE INDEX IF NOT EXISTS idx_invoices_biz_issued ON invoices(business_id, issued_at);
+                CREATE INDEX IF NOT EXISTS idx_router_telemetry_router_time ON router_telemetry_history(router_id, recorded_at DESC);
                 """
             )
 
@@ -608,6 +630,24 @@ class DatabaseManager:
             self.conn.execute("ALTER TABLE payments ADD COLUMN payment_mode TEXT NOT NULL DEFAULT 'GATEWAY';")
         if not self._has_column("vouchers", "bound_device_name"):
             self.conn.execute("ALTER TABLE vouchers ADD COLUMN bound_device_name TEXT;")
+        if not self._has_column("businesses", "auto_sync_profiles"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN auto_sync_profiles INTEGER NOT NULL DEFAULT 0;")
+        if not self._has_column("businesses", "description"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN description TEXT;")
+        if not self._has_column("businesses", "physical_address"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN physical_address TEXT;")
+        if not self._has_column("businesses", "city"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN city TEXT;")
+        if not self._has_column("businesses", "website_url"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN website_url TEXT;")
+        if not self._has_column("businesses", "support_hours"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN support_hours TEXT;")
+        if not self._has_column("businesses", "wifi_ssid"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN wifi_ssid TEXT;")
+        if not self._has_column("businesses", "wifi_gateway_ip"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN wifi_gateway_ip TEXT;")
+        if not self._has_column("businesses", "wifi_gateway_type"):
+            self.conn.execute("ALTER TABLE businesses ADD COLUMN wifi_gateway_type TEXT;")
 
         for tbl in (
             "admin_users",

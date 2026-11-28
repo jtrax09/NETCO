@@ -6,6 +6,7 @@ import {
   Activity,
   BarChart3,
   Bell,
+  Briefcase,
   Building2,
   CreditCard,
   Layers,
@@ -41,6 +42,7 @@ import { RoutersView } from './components/RoutersView.tsx';
 import { ReportsView } from './components/ReportsView.tsx';
 import { NotificationsView } from './components/NotificationsView.tsx';
 import { StaffAuditView } from './components/StaffAuditView.tsx';
+import { BusinessDetailsView } from './components/BusinessDetailsView.tsx';
 import { SettingsView } from './components/SettingsView.tsx';
 import {
   LiquidGlassExpandableSidebar,
@@ -66,6 +68,7 @@ type AdminSection =
   | 'reports'
   | 'notifications'
   | 'staff'
+  | 'business'
   | 'settings';
 
 const VALID_SECTIONS = new Set<AdminSection>([
@@ -82,6 +85,7 @@ const VALID_SECTIONS = new Set<AdminSection>([
   'reports',
   'notifications',
   'staff',
+  'business',
   'settings',
 ]);
 
@@ -312,6 +316,7 @@ function TraxLinkWorkspace() {
       label: tAdmin.groups.administration,
       items: [
         { id: 'notifications', label: tAdmin.sections.notifications, href: '#notifications', icon: <Bell /> },
+        { id: 'business', label: tAdmin.shortSections.business, href: '#business', icon: <Briefcase /> },
         ...(isBusinessManager
           ? [
               { id: 'staff', label: tAdmin.shortSections.staff, href: '#staff', icon: <Shield /> },
@@ -348,7 +353,7 @@ function TraxLinkWorkspace() {
   };
 
   return (
-    <div className="relative min-h-screen bg-stone-100 dark:bg-[#101010] text-[#101010] dark:text-[#FAFAFA] flex">
+    <div className="relative min-h-screen bg-stone-100 dark:bg-[#08090C] cinematic-backdrop text-[#101010] dark:text-[#FAFAFA] flex">
       {/* Desktop Liquid Glass Expandable Sidebar */}
       <div className="no-print hidden lg:flex shrink-0 sticky top-3 self-start ml-3 my-3 z-20">
         <LiquidGlassExpandableSidebar
@@ -419,11 +424,11 @@ function TraxLinkWorkspace() {
               <Menu className="w-5 h-5" />
             </button>
             <div className="text-xs sm:text-sm font-medium truncate">
-              <span className="hidden sm:inline text-zinc-400">
+              <span className="hidden sm:inline font-futuristic text-[11px] tracking-[0.12em] uppercase text-zinc-400">
                 {activeTenantName || user.businessName || 'TRAX LINK'}
               </span>
               <span className="hidden sm:inline mx-2 text-zinc-600">/</span>
-              <span className="font-semibold text-[#101010] dark:text-white">{tAdmin.sections[section]}</span>
+              <span className="font-display font-bold tracking-tight text-[#101010] dark:text-white">{tAdmin.sections[section]}</span>
             </div>
             {isSuperAdmin && activeTenantId && (
               <button
@@ -494,6 +499,7 @@ function TraxLinkWorkspace() {
                 <DashboardView
                   token={token}
                   refreshTrigger={refreshTrigger}
+                  canManageWifi={isOperator}
                   onNavigate={(s) => setSection(s as AdminSection)}
                 />
               )}
@@ -539,6 +545,15 @@ function TraxLinkWorkspace() {
                 <NotificationsView token={token} refreshTrigger={refreshTrigger} />
               )}
               {section === 'staff' && <StaffAuditView token={token} currentRole={user.role} />}
+              {section === 'business' && (
+                <BusinessDetailsView
+                  token={token}
+                  canManage={isBusinessManager}
+                  refreshTrigger={refreshTrigger}
+                  onNavigate={(s) => setSection(s as AdminSection)}
+                  onSaved={() => setRefreshTrigger((n) => n + 1)}
+                />
+              )}
               {section === 'settings' && isBusinessManager && (
                 <SettingsView
                   token={token}

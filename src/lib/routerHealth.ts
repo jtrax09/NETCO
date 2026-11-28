@@ -2,8 +2,76 @@ export const ROUTER_CPU_WARN_PCT = 75;
 export const ROUTER_CPU_CRIT_PCT = 90;
 export const ROUTER_MEM_WARN_PCT = 80;
 export const ROUTER_MEM_CRIT_PCT = 92;
+export const ROUTER_RTT_ALERT_MS = 100;
+export const ROUTER_AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
+
+export interface DiscoveredRouterCandidate {
+  host: string;
+  alreadyAdded?: boolean;
+}
+
+export function findNewlyDetectedRouters<T extends DiscoveredRouterCandidate>(
+  discovered: readonly T[],
+  existingRouters: readonly { host: string }[],
+  dismissedHosts?: ReadonlySet<string>
+): T[] {
+  const existingHosts = new Set(
+    existingRouters
+      .map((r) => r.host.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const seen = new Set<string>();
+  const fresh: T[] = [];
+
+  for (const item of discovered) {
+    const normalizedHost = item.host.trim().toLowerCase();
+    if (!normalizedHost) continue;
+    if (item.alreadyAdded || existingHosts.has(normalizedHost)) continue;
+    if (dismissedHosts?.has(normalizedHost)) continue;
+    if (seen.has(normalizedHost)) continue;
+    seen.add(normalizedHost);
+    fresh.push(item);
+  }
+
+  return fresh;
+}
+
+export type BulkCommandType = 'UPDATE_SSID' | 'UPDATE_NTP' | 'SET_DNS_SERVERS' | 'SET_TIMEZONE';
+
+export function toggleRouterIdSelection(currentIds: readonly string[], routerId: string): string[] {
+  if (currentIds.includes(routerId)) {
+    return currentIds.filter((id) => id !== routerId);
+  }
+  return [...currentIds, routerId];
+}
 
 export type RouterHealthLevel = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'OFFLINE';
+export type PingLatencyLevel = 'NORMAL' | 'HIGH_LATENCY' | 'UNREACHABLE';
+
+export function evaluatePingLatency(ping: {
+  reachable: boolean;
+  roundTripMs: number | null;
+}): { level: PingLatencyLevel; exceedsThreshold: boolean; label: string } {
+  if (!ping.reachable || ping.roundTripMs === null || !Number.isFinite(ping.roundTripMs)) {
+    return {
+      level: 'UNREACHABLE',
+      exceedsThreshold: false,
+      label: 'Unreachable',
+    };
+  }
+  if (ping.roundTripMs > ROUTER_RTT_ALERT_MS) {
+    return {
+      level: 'HIGH_LATENCY',
+      exceedsThreshold: true,
+      label: `Unstable (> ${ROUTER_RTT_ALERT_MS}ms)`,
+    };
+  }
+  return {
+    level: 'NORMAL',
+    exceedsThreshold: false,
+    label: 'Stable Latency',
+  };
+}
 
 export interface RouterTelemetryInput {
   status: 'CONNECTED' | 'NOT_CONNECTED' | 'ERROR';

@@ -10,11 +10,14 @@ import {
   Clock,
   Copy,
   CreditCard,
+  ExternalLink,
+  Globe,
   Info,
   KeyRound,
   LifeBuoy,
   Lock,
   LogOut,
+  MapPin,
   Moon,
   Phone,
   Search,
@@ -43,8 +46,24 @@ interface PortalBusiness {
   slug: string;
   hotspotTitle: string | null;
   hotspotSupportPhone: string | null;
+  description?: string | null;
+  physicalAddress?: string | null;
+  city?: string | null;
+  websiteUrl?: string | null;
+  supportHours?: string | null;
+  wifiSsid?: string | null;
   country: string;
   currency: string;
+}
+
+function getSafePortalUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw.trim());
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 interface PortalPackage {
@@ -694,7 +713,7 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
   };
 
   return (
-    <div className="min-h-screen bg-[#F2F2F7] dark:bg-[#0B0B0D] text-[#111113] dark:text-[#F5F5F7] flex flex-col">
+    <div className="min-h-screen bg-[#F2F2F7] dark:bg-[#08090C] cinematic-backdrop text-[#111113] dark:text-[#F5F5F7] flex flex-col">
       {/* Compact iOS Frosted Top Navigation Bar */}
       <header className="sticky top-0 z-30 h-[52px] sm:h-16 px-4 sm:px-6 border-b ios-glass-bar flex items-center justify-between gap-4">
         <TraxLogo variant="compact" />
@@ -752,14 +771,14 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
       <main className="flex-1 w-full max-w-6xl mx-auto px-3.5 sm:px-6 pt-4 sm:pt-7 pb-24 md:pb-12 space-y-5">
         {/* Dynamic Connection / Greeting Card */}
         {isSessionActive && portalSession ? (
-          <section className="ios-surface p-5 sm:p-6 bg-gradient-to-br from-[#141416] to-[#1D1D21] text-white border border-emerald-500/35">
+          <section className="ios-surface p-5 sm:p-6 bg-gradient-to-br from-[#101217] via-[#151820] to-[#1A1D26] text-white border border-emerald-500/35 shadow-[0_18px_48px_-22px_rgba(16,185,129,0.45)]">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-start gap-3.5">
                 <div className="w-12 h-12 rounded-2xl bg-emerald-500/18 border border-emerald-400/35 flex items-center justify-center shrink-0">
                   <Wifi className="w-6 h-6 text-emerald-400" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2 text-xs font-medium text-emerald-400">
+                  <div className="flex items-center gap-2 text-[11px] font-futuristic uppercase tracking-[0.14em] text-emerald-400">
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     <span>{t.activeSessionTitle}</span>
                   </div>
@@ -779,7 +798,7 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
               <div className="flex items-center justify-between sm:justify-end gap-4 pt-3 sm:pt-0 border-t sm:border-t-0 border-white/10">
                 <div className="sm:text-right">
                   <span className="text-[11px] text-zinc-400 block">{t.remainingTimeLabel}</span>
-                  <span className="font-mono font-bold text-2xl sm:text-3xl tracking-tight text-emerald-400 tabular-nums">
+                  <span className="font-futuristic font-bold text-2xl sm:text-3xl tracking-[0.06em] text-emerald-400 tabular-nums drop-shadow-[0_0_12px_rgba(52,211,153,0.35)]">
                     {formatCountdown(remainingSeconds)}
                   </span>
                 </div>
@@ -796,9 +815,9 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
             </div>
           </section>
         ) : (
-          <section className="ios-surface px-5 py-4 sm:px-7 sm:py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="space-y-1 max-w-2xl">
-              <div className="flex items-center gap-2 text-xs font-medium text-[#9A7B00] dark:text-[#FFD400]">
+          <section className="relative overflow-hidden ios-surface px-5 py-5 sm:px-7 sm:py-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-black/[0.07] dark:border-[#FFD400]/18">
+            <div className="space-y-1.5 max-w-2xl">
+              <div className="flex items-center gap-2 text-[11px] font-futuristic uppercase tracking-[0.16em] text-[#9A7B00] dark:text-[#FFD400]">
                 <Wifi className="w-4 h-4 shrink-0" />
                 <span>{currentBusiness?.hotspotTitle || currentBusiness?.name || 'TRAX LINK WiFi'}</span>
               </div>
@@ -1583,6 +1602,81 @@ export function PortalView({ onSwitchToAdmin, theme, onToggleTheme, lang, onTogg
                 </button>
               </form>
             </section>
+
+            {currentBusiness && (
+              <section className="lg:col-span-12 ios-surface p-5 sm:p-6 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-black/[0.06] dark:border-white/[0.07]">
+                  <div>
+                    <h3 className="text-lg font-bold tracking-tight flex items-center gap-2">
+                      <Building2 className="w-4 h-4 text-[#9A7B00] dark:text-[#FFD400]" />
+                      {t.businessDetailsTitle}
+                    </h3>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                      {currentBusiness.description || t.aboutProviderDefault}
+                    </p>
+                  </div>
+                  <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                    {currentBusiness.name} ({currentBusiness.currency})
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                  <div className="ios-grouped-cell p-3.5 space-y-1">
+                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
+                      <Phone className="w-3.5 h-3.5" />
+                      {t.contactLabel}
+                    </span>
+                    <p className="font-mono font-semibold text-zinc-900 dark:text-white">
+                      {currentBusiness.hotspotSupportPhone || '—'}
+                    </p>
+                  </div>
+
+                  <div className="ios-grouped-cell p-3.5 space-y-1">
+                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5" />
+                      {t.supportHoursLabel}
+                    </span>
+                    <p className="font-medium text-zinc-900 dark:text-white">
+                      {currentBusiness.supportHours || 'Mon–Sun'}
+                    </p>
+                  </div>
+
+                  <div className="ios-grouped-cell p-3.5 space-y-1">
+                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5" />
+                      {t.addressLabel}
+                    </span>
+                    <p className="font-medium text-zinc-900 dark:text-white">
+                      {[currentBusiness.physicalAddress, currentBusiness.city, currentBusiness.country]
+                        .filter(Boolean)
+                        .join(', ')}
+                    </p>
+                  </div>
+
+                  <div className="ios-grouped-cell p-3.5 space-y-1">
+                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5" />
+                      {t.websiteLabel}
+                    </span>
+                    {getSafePortalUrl(currentBusiness.websiteUrl) ? (
+                      <a
+                        href={getSafePortalUrl(currentBusiness.websiteUrl)!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 font-mono font-semibold text-[#9A7B00] dark:text-[#FFD400] hover:underline break-all"
+                      >
+                        <span>{getSafePortalUrl(currentBusiness.websiteUrl)}</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                    ) : (
+                      <p className="font-mono text-zinc-600 dark:text-zinc-300">
+                        {currentBusiness.wifiSsid ? `WiFi: ${currentBusiness.wifiSsid}` : currentBusiness.country}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )}
           </div>
         )}
 

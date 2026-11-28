@@ -4,8 +4,9 @@
 @layer base {
   :root {
     color-scheme: light;
-    --font-display: "Plus Jakarta Sans", system-ui, sans-serif;
-    --font-body: "DM Sans", system-ui, sans-serif;
+    --font-brand: "Oxanium", "Exo 2", system-ui, sans-serif;
+    --font-display: "Exo 2", system-ui, sans-serif;
+    --font-body: "Outfit", system-ui, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
     --color-background: #f5f5f4;
@@ -22,9 +23,9 @@
 
   .dark {
     color-scheme: dark;
-    --color-background: #101010;
+    --color-background: #090a0d;
     --color-foreground: #fafafa;
-    --color-card: #161618;
+    --color-card: #13151a;
     --color-card-foreground: #fafafa;
     --color-primary: #ffd400;
     --color-primary-foreground: #101010;
@@ -42,12 +43,35 @@
 
   h1, h2, h3, h4, .font-display {
     font-family: var(--font-display);
+    letter-spacing: -0.02em;
   }
 
   code, pre, .font-mono {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+}
+
+.font-futuristic {
+  font-family: var(--font-brand);
+  letter-spacing: 0.08em;
+}
+
+.cinematic-backdrop {
+  background-image:
+    radial-gradient(ellipse 75% 42% at 50% -10%, rgba(255, 212, 0, 0.11), transparent 72%),
+    linear-gradient(to right, rgba(16, 16, 16, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(16, 16, 16, 0.03) 1px, transparent 1px);
+  background-size: 100% 100%, 44px 44px, 44px 44px;
+}
+
+.dark .cinematic-backdrop {
+  background-image:
+    radial-gradient(ellipse 78% 44% at 50% -12%, rgba(255, 212, 0, 0.12), transparent 70%),
+    radial-gradient(ellipse 46% 32% at 88% 8%, rgba(56, 189, 248, 0.05), transparent 70%),
+    linear-gradient(to right, rgba(255, 255, 255, 0.024) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.024) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 44px 44px, 44px 44px;
 }
 
 .tabular-nums {

@@ -15,6 +15,12 @@ interface BusinessSettingsData {
     timezone: string;
     hotspotTitle: string | null;
     hotspotSupportPhone: string | null;
+    description?: string | null;
+    physicalAddress?: string | null;
+    city?: string | null;
+    websiteUrl?: string | null;
+    supportHours?: string | null;
+    autoSyncProfiles?: boolean;
     createdAt: string;
     updatedAt: string;
   };
@@ -65,6 +71,11 @@ export function SettingsView({ token, userRole, refreshTrigger, onSaved }: Props
   const [timezone, setTimezone] = useState('Africa/Dar_es_Salaam');
   const [hotspotTitle, setHotspotTitle] = useState('');
   const [hotspotSupportPhone, setHotspotSupportPhone] = useState('');
+  const [description, setDescription] = useState('');
+  const [physicalAddress, setPhysicalAddress] = useState('');
+  const [city, setCity] = useState('');
+  const [websiteUrl, setWebsiteUrl] = useState('');
+  const [supportHours, setSupportHours] = useState('');
 
   const load = async () => {
     setLoading(true);
@@ -80,6 +91,11 @@ export function SettingsView({ token, userRole, refreshTrigger, onSaved }: Props
       setTimezone(res.settings.timezone || 'Africa/Dar_es_Salaam');
       setHotspotTitle(res.settings.hotspotTitle || '');
       setHotspotSupportPhone(res.settings.hotspotSupportPhone || '');
+      setDescription(res.settings.description || '');
+      setPhysicalAddress(res.settings.physicalAddress || '');
+      setCity(res.settings.city || '');
+      setWebsiteUrl(res.settings.websiteUrl || '');
+      setSupportHours(res.settings.supportHours || '');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load business settings');
     } finally {
@@ -109,6 +125,11 @@ export function SettingsView({ token, userRole, refreshTrigger, onSaved }: Props
           timezone: timezone.trim(),
           hotspotTitle: hotspotTitle.trim() || null,
           hotspotSupportPhone: hotspotSupportPhone.trim() || null,
+          description: description.trim() || null,
+          physicalAddress: physicalAddress.trim() || null,
+          city: city.trim() || null,
+          websiteUrl: websiteUrl.trim() || null,
+          supportHours: supportHours.trim() || null,
         },
       });
       setNotice('Business settings saved and synchronized with the Customer Portal.');
@@ -129,7 +150,7 @@ export function SettingsView({ token, userRole, refreshTrigger, onSaved }: Props
       await apiRequest('/api/system/mode', {
         method: 'PATCH',
         token,
-        body: { mode },
+        body: { operatingMode: mode },
       });
       setNotice(
         mode === 'MIKROTIK_MODE'
@@ -297,6 +318,66 @@ export function SettingsView({ token, userRole, refreshTrigger, onSaved }: Props
                   className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
                 />
               </div>
+
+              <div>
+                <label className="block font-medium mb-1">City / Region</label>
+                <input
+                  type="text"
+                  maxLength={80}
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  placeholder="Dar es Salaam"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium mb-1">Support Hours</label>
+                <input
+                  type="text"
+                  maxLength={100}
+                  value={supportHours}
+                  onChange={(e) => setSupportHours(e.target.value)}
+                  placeholder="Mon–Sun · 07:00 – 22:00 EAT"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium mb-1">Physical Address</label>
+                <input
+                  type="text"
+                  maxLength={180}
+                  value={physicalAddress}
+                  onChange={(e) => setPhysicalAddress(e.target.value)}
+                  placeholder="Samora Ave, Plot 14"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium mb-1">Business Website (https://)</label>
+                <input
+                  type="url"
+                  maxLength={240}
+                  value={websiteUrl}
+                  onChange={(e) => setWebsiteUrl(e.target.value)}
+                  placeholder="https://example.co.tz"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block font-medium mb-1">About / Business Page Description</label>
+              <textarea
+                rows={2}
+                maxLength={400}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Fast, reliable prepaid WiFi coverage across campuses, lounges, and residential zones."
+                className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]"
+              />
             </div>
           </div>
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateRouterHealth } from '../routerHealth.ts';
+import {
+  evaluatePingLatency,
+  evaluateRouterHealth,
+  findNewlyDetectedRouters,
+  ROUTER_AUTO_SCAN_INTERVAL_MS,
+  ROUTER_RTT_ALERT_MS,
+  toggleRouterIdSelection,
+} from '../routerHealth.ts';
 
 describe('evaluateRouterHealth', () => {
   it('returns HEALTHY when connected router cpu_load and memory are below thresholds', () => {
@@ -64,5 +71,57 @@ describe('evaluateRouterHealth', () => {
       memoryTotalBytes: null,
     });
     expect(res.level).toBe('OFFLINE');
+  });
+});
+
+describe('evaluatePingLatency', () => {
+  it('treats RTT at or below 100ms as NORMAL', () => {
+    expect(ROUTER_RTT_ALERT_MS).toBe(100);
+    const res = evaluatePingLatency({ reachable: true, roundTripMs: 100 });
+    expect(res.level).toBe('NORMAL');
+    expect(res.exceedsThreshold).toBe(false);
+  });
+
+  it('flags RTT exceeding 100ms as HIGH_LATENCY alert', () => {
+    const res = evaluatePingLatency({ reachable: true, roundTripMs: 124.6 });
+    expect(res.level).toBe('HIGH_LATENCY');
+    expect(res.exceedsThreshold).toBe(true);
+    expect(res.label).toContain('100ms');
+  });
+
+  it('returns UNREACHABLE when ping fails', () => {
+    const res = evaluatePingLatency({ reachable: false, roundTripMs: null });
+    expect(res.level).toBe('UNREACHABLE');
+    expect(res.exceedsThreshold).toBe(false);
+  });
+});
+
+describe('findNewlyDetectedRouters', () => {
+  it('configures periodic auto-scan interval to exactly 5 minutes', () => {
+    expect(ROUTER_AUTO_SCAN_INTERVAL_MS).toBe(300_000);
+  });
+
+  it('filters out already added, existing, duplicate, and dismissed hosts', () => {
+    const discovered = [
+      { host: '192.168.88.1', alreadyAdded: true },
+      { host: '192.168.88.10', alreadyAdded: false },
+      { host: '192.168.88.20', alreadyAdded: false },
+      { host: '192.168.88.20', alreadyAdded: false },
+      { host: '192.168.88.30', alreadyAdded: false },
+    ];
+    const existingRouters = [{ host: '192.168.88.10' }];
+    const dismissedHosts = new Set(['192.168.88.30']);
+
+    const newlyDetected = findNewlyDetectedRouters(discovered, existingRouters, dismissedHosts);
+    expect(newlyDetected).toEqual([{ host: '192.168.88.20', alreadyAdded: false }]);
+  });
+});
+
+describe('toggleRouterIdSelection', () => {
+  it('adds and removes router IDs without mutating existing selection', () => {
+    const step1 = toggleRouterIdSelection(['rtr_1'], 'rtr_2');
+    expect(step1).toEqual(['rtr_1', 'rtr_2']);
+    const step2 = toggleRouterIdSelection(step1, 'rtr_1');
+    expect(step2).toEqual(['rtr_2']);
   });
 });

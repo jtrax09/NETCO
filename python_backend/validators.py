@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from typing import Any
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -10,6 +11,16 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def is_valid_email(value: Any, max_len: int = 254) -> bool:
     return isinstance(value, str) and len(value.strip()) <= max_len and bool(EMAIL_RE.match(value.strip()))
+
+
+def is_valid_http_url(value: Any, max_len: int = 240) -> bool:
+    if not isinstance(value, str):
+        return False
+    raw = value.strip()
+    if not raw or len(raw) > max_len or any(ch.isspace() for ch in raw):
+        return False
+    parsed = urllib.parse.urlparse(raw)
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc) and "." in parsed.netloc
 
 
 def clean_str(value: Any, min_len: int = 0, max_len: int = 500) -> str | None:

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   CartesianGrid,
@@ -15,27 +15,42 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
+  BarChart3,
+  BellRing,
   Check,
   CheckCircle2,
+  CheckSquare,
+  Clock,
   Copy,
   Gauge,
   KeyRound,
   Pause,
   Plus,
+  Radar,
   Radio,
   RefreshCw,
   Router as RouterIcon,
   ShieldAlert,
+  Square,
+  Terminal,
   Trash2,
   Wifi,
   X,
 } from 'lucide-react';
 import { apiRequest, formatBytes } from '../lib/api.ts';
 import {
+  type BulkCommandType,
+  evaluatePingLatency,
   evaluateRouterHealth,
+  findNewlyDetectedRouters,
+  ROUTER_AUTO_SCAN_INTERVAL_MS,
   ROUTER_CPU_WARN_PCT,
   ROUTER_MEM_WARN_PCT,
+  ROUTER_RTT_ALERT_MS,
+  toggleRouterIdSelection,
 } from '../lib/routerHealth.ts';
+import { RouterAnalyticsView } from './RouterAnalyticsView.tsx';
+import { WifiConnectCard } from './WifiConnectCard.tsx';
 import { MobileModal, NATIVE_SPRING } from './ui/MotionPrimitives.tsx';
 
 interface RouterItem {
@@ -133,6 +148,50 @@ interface RouterPingResult {
   error: string | null;
 }
 
+interface DiscoveredRouter {
+  host: string;
+  apiPort: number;
+  useTls: boolean;
+  suggestedName: string;
+  identity: string | null;
+  boardName: string | null;
+  routerOsVersion: string | null;
+  macAddress: string | null;
+  interfaceName: string | null;
+  routerOsFamily: 'ROUTEROS_V6' | 'ROUTEROS_V7';
+  discoveryMethods: string[];
+  apiVerified: boolean;
+  roundTripMs: number | null;
+  alreadyAdded: boolean;
+}
+
+interface NetworkScanResult {
+  ipRange: string;
+  scannedHosts: number;
+  durationMs: number;
+  discovered: DiscoveredRouter[];
+}
+
+interface BulkCommandRouterResult {
+  routerId: string;
+  routerName: string;
+  host: string;
+  apiPort: number;
+  commandType: BulkCommandType;
+  success: boolean;
+  summary: string | null;
+  error: string | null;
+}
+
+interface BulkCommandResponse {
+  commandType: BulkCommandType;
+  totalRequested: number;
+  succeededCount: number;
+  failedCount: number;
+  executedAt: string;
+  results: BulkCommandRouterResult[];
+}
+
 interface Props {
   token: string;
   refreshTrigger: number;
@@ -153,8 +212,30 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
   const [testingId, setTestingId] = useState<string | null>(null);
   const [pingingId, setPingingId] = useState<string | null>(null);
   const [pingToast, setPingToast] = useState<RouterPingResult | null>(null);
+  const [pingResultsByRouter, setPingResultsByRouter] = useState<Record<string, RouterPingResult>>({});
+  const [analyticsRouterId, setAnalyticsRouterId] = useState<string | null>(null);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [autoSyncProfiles, setAutoSyncProfiles] = useState(false);
+  const [savingRouterSettings, setSavingRouterSettings] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
+
+  const [scanRange, setScanRange] = useState('192.168.88.0/24');
+  const [scanPort, setScanPort] = useState('8728');
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [scanResult, setScanResult] = useState<NetworkScanResult | null>(null);
+  const [autoScanEnabled, setAutoScanEnabled] = useState(true);
+  const [lastAutoScanAt, setLastAutoScanAt] = useState<string | null>(null);
+  const [nextAutoScanAt, setNextAutoScanAt] = useState<number | null>(null);
+  const [dismissedDetectedHosts, setDismissedDetectedHosts] = useState<string[]>([]);
+
+  const scannerSectionRef = useRef<HTMLElement | null>(null);
+  const scanRangeRef = useRef(scanRange);
+  const scanPortRef = useRef(scanPort);
+  const scanningRef = useRef(scanning);
+  scanRangeRef.current = scanRange;
+  scanPortRef.current = scanPort;
+  scanningRef.current = scanning;
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<RouterItem | null>(null);
@@ -181,19 +262,42 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
   } | null>(null);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
 
+  const [selectedRouterIds, setSelectedRouterIds] = useState<string[]>([]);
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [bulkCommandType, setBulkCommandType] = useState<BulkCommandType>('UPDATE_SSID');
+  const [bulkSsid, setBulkSsid] = useState('TRAX-LINK-WIFI');
+  const [bulkWifiIface, setBulkWifiIface] = useState('');
+  const [bulkNtpPrimary, setBulkNtpPrimary] = useState('pool.ntp.org');
+  const [bulkNtpSecondary, setBulkNtpSecondary] = useState('time.cloudflare.com');
+  const [bulkNtpEnabled, setBulkNtpEnabled] = useState(true);
+  const [bulkDnsServers, setBulkDnsServers] = useState('1.1.1.1,8.8.8.8');
+  const [bulkDnsRemote, setBulkDnsRemote] = useState(true);
+  const [bulkTimezone, setBulkTimezone] = useState('Africa/Dar_es_Salaam');
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkResult, setBulkResult] = useState<BulkCommandResponse | null>(null);
+
   const load = async () => {
     setLoading(true);
     try {
-      const [res, mRes, locRes, ovRes] = await Promise.all([
+      const [res, mRes, locRes, ovRes, rSetRes] = await Promise.all([
         apiRequest<{ routers: RouterItem[] }>('/api/routers', { token }),
         apiRequest<SystemModeInfo>('/api/system/mode'),
         apiRequest<{ locations: LocationOption[] }>('/api/locations', { token }).catch(() => ({ locations: [] })),
         apiRequest<RouterBandwidthOverview>('/api/routers/overview', { token }).catch(() => null),
+        apiRequest<{ businessId: string; autoSyncProfiles: boolean }>('/api/routers/settings', { token }).catch(() => ({
+          businessId: '',
+          autoSyncProfiles: false,
+        })),
       ]);
       setRouters(res.routers);
+      setSelectedRouterIds((prev) =>
+        prev.filter((id) => res.routers.some((router) => router.id === id))
+      );
       setModeInfo(mRes);
       setLocations(locRes.locations);
       if (ovRes) setOverview(ovRes);
+      setAutoSyncProfiles(Boolean(rSetRes.autoSyncProfiles));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load routers');
     } finally {
@@ -277,6 +381,31 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     }
   };
 
+  const handleToggleAutoSyncProfiles = async () => {
+    if (!canManage || savingRouterSettings) return;
+    const nextValue = !autoSyncProfiles;
+    setSavingRouterSettings(true);
+    setError(null);
+    setSyncMsg(null);
+    try {
+      const updated = await apiRequest<{ businessId: string; autoSyncProfiles: boolean }>('/api/routers/settings', {
+        method: 'PATCH',
+        token,
+        body: { autoSyncProfiles: nextValue },
+      });
+      setAutoSyncProfiles(Boolean(updated.autoSyncProfiles));
+      setSyncMsg(
+        updated.autoSyncProfiles
+          ? 'Auto-sync enabled: creating or updating a WiFi package will automatically push hotspot profiles to configured MikroTik routers.'
+          : 'Auto-sync disabled: hotspot profiles will only sync manually from each router card.'
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update router settings');
+    } finally {
+      setSavingRouterSettings(false);
+    }
+  };
+
   const openCreate = () => {
     setEditing(null);
     setName('');
@@ -290,6 +419,101 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     setRouterOsFamily('ROUTEROS_V7');
     setError(null);
     setModalOpen(true);
+  };
+
+  const openCreateFromScan = (item: DiscoveredRouter) => {
+    setEditing(null);
+    setName(item.suggestedName);
+    setHost(item.host);
+    setApiPort(String(item.apiPort || 8728));
+    setUseTls(Boolean(item.useTls));
+    setUsername('');
+    setPassword('');
+    setHotspotServer('');
+    setLocationId(locations[0]?.id || '');
+    setRouterOsFamily(item.routerOsFamily || 'ROUTEROS_V7');
+    setError(null);
+    setModalOpen(true);
+  };
+
+  const executeNetworkScan = useCallback(
+    async (mode: 'manual' | 'auto') => {
+      if (scanningRef.current) return;
+      const trimmedRange = scanRangeRef.current.trim();
+      if (!trimmedRange) {
+        if (mode === 'manual') {
+          setScanError('Enter an IPv4 range or CIDR subnet to scan.');
+        }
+        return;
+      }
+
+      scanningRef.current = true;
+      setScanning(true);
+      if (mode === 'manual') {
+        setScanError(null);
+      }
+
+      try {
+        const parsedPort = Number(scanPortRef.current) || 8728;
+        const res = await apiRequest<NetworkScanResult>('/api/routers/scan', {
+          method: 'POST',
+          token,
+          body: {
+            ipRange: trimmedRange,
+            apiPort: parsedPort,
+            includeMndp: true,
+          },
+        });
+        setScanResult(res);
+        setLastAutoScanAt(new Date().toISOString());
+        if (mode === 'manual') {
+          setDismissedDetectedHosts([]);
+        }
+      } catch (err) {
+        if (mode === 'manual') {
+          setScanError(err instanceof Error ? err.message : 'Network scan failed');
+        }
+      } finally {
+        scanningRef.current = false;
+        setScanning(false);
+      }
+    },
+    [token]
+  );
+
+  useEffect(() => {
+    if (!canManage || !autoScanEnabled) {
+      setNextAutoScanAt(null);
+      return;
+    }
+
+    setNextAutoScanAt(Date.now() + ROUTER_AUTO_SCAN_INTERVAL_MS);
+    const timer = window.setInterval(() => {
+      setNextAutoScanAt(Date.now() + ROUTER_AUTO_SCAN_INTERVAL_MS);
+      void executeNetworkScan('auto');
+    }, ROUTER_AUTO_SCAN_INTERVAL_MS);
+
+    return () => window.clearInterval(timer);
+  }, [canManage, autoScanEnabled, executeNetworkScan]);
+
+  const newlyDetectedRouters = useMemo(() => {
+    if (!scanResult) return [];
+    return findNewlyDetectedRouters(
+      scanResult.discovered,
+      routers,
+      new Set(dismissedDetectedHosts)
+    );
+  }, [scanResult, routers, dismissedDetectedHosts]);
+
+  const handleDismissDetected = () => {
+    const hosts = newlyDetectedRouters.map((r) => r.host.trim().toLowerCase()).filter(Boolean);
+    if (hosts.length === 0) return;
+    setDismissedDetectedHosts((prev) => Array.from(new Set([...prev, ...hosts])));
+  };
+
+  const handleScanNetwork = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeNetworkScan('manual');
   };
 
   const openEdit = (r: RouterItem) => {
@@ -392,8 +616,9 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
         token,
       });
       setPingToast(res.ping);
+      setPingResultsByRouter((prev) => ({ ...prev, [router.id]: res.ping }));
     } catch (err) {
-      setPingToast({
+      const failed: RouterPingResult = {
         routerId: router.id,
         routerName: router.name,
         host: router.host,
@@ -403,7 +628,9 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
         method: router.useTls ? 'TCP_TLS' : 'TCP',
         checkedAt: new Date().toISOString(),
         error: err instanceof Error ? err.message : 'Ping diagnostic failed',
-      });
+      };
+      setPingToast(failed);
+      setPingResultsByRouter((prev) => ({ ...prev, [router.id]: failed }));
     } finally {
       setPingingId(null);
     }
@@ -451,6 +678,83 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
     }
   };
 
+  const selectedRouters = useMemo(
+    () => routers.filter((r) => selectedRouterIds.includes(r.id)),
+    [routers, selectedRouterIds]
+  );
+
+  const toggleSelectRouter = (id: string) => {
+    setSelectedRouterIds((prev) => toggleRouterIdSelection(prev, id));
+  };
+
+  const selectAllRouters = () => {
+    setSelectedRouterIds(routers.map((r) => r.id));
+  };
+
+  const clearSelectedRouters = () => {
+    setSelectedRouterIds([]);
+  };
+
+  const openBulkCommandModal = () => {
+    setBulkError(null);
+    setBulkResult(null);
+    setBulkModalOpen(true);
+  };
+
+  const handleRunBulkCommand = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (selectedRouterIds.length === 0) {
+      setBulkError('Select at least one router to execute a bulk command.');
+      return;
+    }
+
+    setBulkSubmitting(true);
+    setBulkError(null);
+    setBulkResult(null);
+    try {
+      let params: Record<string, unknown> = {};
+      if (bulkCommandType === 'UPDATE_SSID') {
+        params = {
+          ssid: bulkSsid.trim(),
+          interfaceName: bulkWifiIface.trim(),
+        };
+      } else if (bulkCommandType === 'UPDATE_NTP') {
+        params = {
+          primaryServer: bulkNtpPrimary.trim(),
+          secondaryServer: bulkNtpSecondary.trim(),
+          enabled: bulkNtpEnabled,
+        };
+      } else if (bulkCommandType === 'SET_DNS_SERVERS') {
+        params = {
+          servers: bulkDnsServers.trim(),
+          allowRemoteRequests: bulkDnsRemote,
+        };
+      } else {
+        params = {
+          timezone: bulkTimezone.trim(),
+        };
+      }
+
+      const res = await apiRequest<BulkCommandResponse>('/api/routers/bulk-command', {
+        method: 'POST',
+        token,
+        body: {
+          routerIds: selectedRouterIds,
+          commandType: bulkCommandType,
+          params,
+        },
+      });
+      setBulkResult(res);
+      setSyncMsg(
+        `Bulk command ${res.commandType} pushed to ${res.totalRequested} router(s): ${res.succeededCount} succeeded, ${res.failedCount} failed.`
+      );
+    } catch (err) {
+      setBulkError(err instanceof Error ? err.message : 'Bulk command execution failed');
+    } finally {
+      setBulkSubmitting(false);
+    }
+  };
+
   const handleDelete = async (id: string) => {
     try {
       await apiRequest(`/api/routers/${id}`, { method: 'DELETE', token });
@@ -461,6 +765,19 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
   };
 
   const operatingMode = modeInfo?.operatingMode || 'STANDALONE_MODE';
+
+  if (analyticsRouterId) {
+    return (
+      <RouterAnalyticsView
+        token={token}
+        routers={routers}
+        initialRouterId={analyticsRouterId}
+        canManage={canManage}
+        onBack={() => setAnalyticsRouterId(null)}
+        onTelemetryRefreshed={() => void load()}
+      />
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -488,6 +805,18 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {canManage && newlyDetectedRouters.length > 0 && (
+            <button
+              type="button"
+              onClick={() => scannerSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#FFD400]/15 text-[#9A7B00] dark:text-[#FFD400] border border-[#FFD400]/45 text-xs font-semibold hover:bg-[#FFD400]/25 transition-colors whitespace-nowrap shrink-0"
+              aria-label={`New Router Detected (${newlyDetectedRouters.length})`}
+            >
+              <BellRing className="w-3.5 h-3.5 shrink-0" />
+              <span>New Router Detected</span>
+              <span className="font-mono tabular-nums font-bold">({newlyDetectedRouters.length})</span>
+            </button>
+          )}
           {canManage && (
             <div className="btn-tab-group">
               <button
@@ -520,6 +849,63 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
           )}
         </div>
       </div>
+
+      {/* Router Settings: Auto-Sync Hotspot Profiles */}
+      <section
+        aria-label="Router Settings"
+        className="p-4 sm:p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 flex flex-wrap items-center justify-between gap-4"
+      >
+        <div className="space-y-1 max-w-2xl">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-sm font-bold text-slate-900 dark:text-white">Router Settings</h2>
+            <span
+              className={`font-mono text-[11px] font-semibold ${
+                autoSyncProfiles
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-slate-500 dark:text-[#8793A5]'
+              }`}
+            >
+              {autoSyncProfiles ? 'Auto-Sync ON' : 'Auto-Sync OFF'}
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 dark:text-[#8793A5]">
+            Automatically synchronize MikroTik hotspot speed profiles whenever a WiFi package is created or updated.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 shrink-0">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoSyncProfiles}
+            aria-label="Automatically sync hotspot profiles to MikroTik hardware on package create or update"
+            disabled={!canManage || savingRouterSettings}
+            onClick={handleToggleAutoSyncProfiles}
+            className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFD400] ${
+              autoSyncProfiles
+                ? 'bg-[#FFD400] border-[#D9B400]'
+                : 'bg-stone-200 dark:bg-zinc-800 border-stone-300 dark:border-white/15'
+            } ${!canManage || savingRouterSettings ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white dark:bg-[#101010] shadow-sm transition-transform ${
+                autoSyncProfiles ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+          <span className="text-xs font-semibold text-slate-700 dark:text-zinc-200 min-w-[68px]">
+            {savingRouterSettings ? 'Saving...' : autoSyncProfiles ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
+      </section>
+
+      <WifiConnectCard
+        token={token}
+        canManage={canManage}
+        refreshTrigger={refreshTrigger}
+        compact={true}
+        onConnected={() => void load()}
+      />
 
       {syncMsg && (
         <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#101827] text-xs font-mono">
@@ -693,6 +1079,225 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
         </div>
       </section>
 
+      {canManage && (
+        <section
+          ref={scannerSectionRef}
+          id="network-router-scanner"
+          aria-label="Network Scanner"
+          className="p-5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 space-y-4"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <h2 className="text-base font-bold flex items-center gap-2">
+                <Radar className="w-4 h-4 text-[#9A7B00] dark:text-[#FFD400]" />
+                Network Router Scanner
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-[#8793A5]">
+                Discover active MikroTik routers across a local subnet or WireGuard tunnel via RouterOS API (8728/8729) and MNDP (UDP 5678).
+              </p>
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500 dark:text-[#8793A5] font-mono tabular-nums">
+                <span className="inline-flex items-center gap-1">
+                  <Clock className="w-3 h-3 shrink-0" />
+                  {autoScanEnabled ? 'Auto-scan every 5 min' : 'Periodic auto-scan paused'}
+                </span>
+                {lastAutoScanAt && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span>Last scan {new Date(lastAutoScanAt).toLocaleTimeString()}</span>
+                  </>
+                )}
+                {autoScanEnabled && nextAutoScanAt && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span>Next scan {new Date(nextAutoScanAt).toLocaleTimeString()}</span>
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+              <button
+                type="button"
+                onClick={() => setAutoScanEnabled((prev) => !prev)}
+                aria-pressed={autoScanEnabled}
+                className="btn-secondary min-h-[32px] px-2.5 py-1 text-[11px] font-sans font-semibold whitespace-nowrap shrink-0"
+              >
+                {autoScanEnabled ? (
+                  <Radio className="w-3.5 h-3.5 text-emerald-500" />
+                ) : (
+                  <Pause className="w-3.5 h-3.5" />
+                )}
+                {autoScanEnabled ? 'Auto-Scan (5m)' : 'Auto-Scan Paused'}
+              </button>
+              {['192.168.88.0/24', '10.66.0.0/28', '192.168.1.0/24'].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setScanRange(preset)}
+                  className="btn-chip-neutral"
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {newlyDetectedRouters.length > 0 && (
+            <div
+              role="status"
+              className="p-3.5 rounded-lg border border-[#FFD400]/45 bg-[#FFD400]/10 flex flex-wrap items-center justify-between gap-3 text-xs"
+            >
+              <div className="flex items-start gap-2.5 min-w-0">
+                <BellRing className="w-4 h-4 shrink-0 mt-0.5 text-[#9A7B00] dark:text-[#FFD400]" />
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-900 dark:text-white">
+                    New Router Detected ({newlyDetectedRouters.length})
+                  </p>
+                  <p className="text-[11px] text-slate-600 dark:text-zinc-300 mt-0.5 font-mono truncate">
+                    {newlyDetectedRouters
+                      .map((item) => `${item.suggestedName} (${item.host}:${item.apiPort})`)
+                      .join(' · ')}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => openCreateFromScan(newlyDetectedRouters[0])}
+                  className="btn-primary min-h-[32px] px-3 py-1 text-xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Add {newlyDetectedRouters.length === 1 ? 'Router' : 'First Router'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDismissDetected}
+                  className="btn-secondary min-h-[32px] px-2.5 py-1 text-xs"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          <form onSubmit={handleScanNetwork} className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end text-xs">
+            <div className="sm:col-span-7">
+              <label htmlFor="scanner-ip-range" className="block font-medium mb-1">
+                IPv4 Range or CIDR (Max /24)
+              </label>
+              <input
+                id="scanner-ip-range"
+                type="text"
+                required
+                value={scanRange}
+                onChange={(e) => setScanRange(e.target.value)}
+                placeholder="192.168.88.0/24 or 192.168.88.1-192.168.88.50"
+                className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label htmlFor="scanner-api-port" className="block font-medium mb-1">
+                API Port
+              </label>
+              <input
+                id="scanner-api-port"
+                type="number"
+                min={1}
+                max={65535}
+                value={scanPort}
+                onChange={(e) => setScanPort(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+              />
+            </div>
+            <div className="sm:col-span-3">
+              <button
+                type="submit"
+                disabled={scanning}
+                className="btn-primary w-full text-xs"
+              >
+                <Radar className={`w-3.5 h-3.5 ${scanning ? 'animate-spin' : ''}`} />
+                {scanning ? 'Scanning Subnet...' : 'Scan Network'}
+              </button>
+            </div>
+          </form>
+
+          {scanError && (
+            <div className="p-3 rounded-lg border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300">
+              {scanError}
+            </div>
+          )}
+
+          {scanResult && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums text-slate-500 dark:text-[#8793A5]">
+                <span>
+                  Scanned {scanResult.scannedHosts} host(s) in {scanResult.ipRange} ({scanResult.durationMs} ms)
+                </span>
+                <span className="font-semibold text-slate-900 dark:text-white">
+                  {scanResult.discovered.length} active MikroTik device(s) found
+                </span>
+              </div>
+
+              {scanResult.discovered.length === 0 ? (
+                <div className="p-4 rounded-lg border border-dashed border-stone-200 dark:border-white/10 text-xs text-slate-500 dark:text-[#8793A5]">
+                  No active MikroTik RouterOS API or MNDP responders found in <span className="font-mono">{scanResult.ipRange}</span>. Ensure RouterOS API (<span className="font-mono">8728/8729</span>) or MNDP (<span className="font-mono">UDP 5678</span>) is reachable over LAN or WireGuard.
+                </div>
+              ) : (
+                <div className="divide-y divide-stone-200 dark:divide-white/10 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]">
+                  {scanResult.discovered.map((item) => {
+                    const alreadyExists =
+                      item.alreadyAdded || routers.some((existing) => existing.host === item.host);
+                    return (
+                      <div
+                        key={`${item.host}:${item.apiPort}`}
+                        className="p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-bold text-slate-900 dark:text-white">
+                              {item.suggestedName}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-mono text-[11px] font-semibold">
+                              {item.discoveryMethods.join(' + ')}
+                            </span>
+                            {item.roundTripMs !== null && (
+                              <span className="font-mono tabular-nums text-[11px] text-slate-500 dark:text-[#8793A5]">
+                                {item.roundTripMs.toFixed(2)} ms
+                              </span>
+                            )}
+                          </div>
+                          <p className="font-mono text-[11px] text-slate-500 dark:text-[#8793A5]">
+                            {item.host}:{item.apiPort} ({item.useTls ? 'TLS' : 'TCP'})
+                            {item.boardName ? ` · Board: ${item.boardName}` : ''}
+                            {item.routerOsVersion ? ` · ROS ${item.routerOsVersion}` : ''}
+                            {item.macAddress ? ` · MAC ${item.macAddress}` : ''}
+                          </p>
+                        </div>
+
+                        {alreadyExists ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-stone-200/70 dark:bg-white/10 text-slate-600 dark:text-zinc-300 font-mono text-[11px] font-semibold">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                            Already in Dashboard
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => openCreateFromScan(item)}
+                            className="btn-primary min-h-[34px] px-3 py-1.5 text-xs"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            Add to Dashboard
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
       {loading ? (
         <div className="p-8 text-center text-xs text-slate-500 dark:text-[#8793A5]">Loading router configuration...</div>
       ) : routers.length === 0 ? (
@@ -749,12 +1354,68 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="space-y-3">
+          {canManage && (
+            <div className="p-3.5 rounded-xl bg-white dark:bg-[#161618] border border-stone-200 dark:border-white/10 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                <span className="font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-[#9A7B00] dark:text-[#FFD400]" />
+                  Managed Routers ({routers.length})
+                </span>
+                <span aria-hidden="true" className="text-slate-400">·</span>
+                <span className="font-mono tabular-nums text-slate-500 dark:text-[#8793A5]">
+                  {selectedRouterIds.length} of {routers.length} selected for bulk push
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={selectedRouterIds.length === routers.length ? clearSelectedRouters : selectAllRouters}
+                  className="btn-secondary min-h-[34px] px-3 py-1.5 text-xs whitespace-nowrap"
+                >
+                  {selectedRouterIds.length === routers.length ? (
+                    <CheckSquare className="w-3.5 h-3.5 text-[#9A7B00] dark:text-[#FFD400]" />
+                  ) : (
+                    <Square className="w-3.5 h-3.5" />
+                  )}
+                  {selectedRouterIds.length === routers.length ? 'Clear All' : 'Select All'}
+                </button>
+                {selectedRouterIds.length > 0 && selectedRouterIds.length < routers.length && (
+                  <button
+                    type="button"
+                    onClick={clearSelectedRouters}
+                    className="btn-secondary min-h-[34px] px-2.5 py-1.5 text-xs whitespace-nowrap"
+                  >
+                    Clear Selection
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={selectedRouterIds.length === 0}
+                  onClick={openBulkCommandModal}
+                  className="btn-primary min-h-[34px] px-3.5 py-1.5 text-xs whitespace-nowrap"
+                >
+                  <Terminal className="w-3.5 h-3.5" />
+                  Bulk Command{selectedRouterIds.length > 0 ? ` (${selectedRouterIds.length})` : ''}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {routers.map((r) => {
             const health = evaluateRouterHealth(r);
+            const lastPing = pingResultsByRouter[r.id];
+            const pingEval = lastPing ? evaluatePingLatency(lastPing) : null;
+            const highLatency = Boolean(pingEval?.exceedsThreshold);
+            const isSelected = selectedRouterIds.includes(r.id);
+
             const cardBorderClass =
-              health.level === 'CRITICAL'
-                ? 'border-red-400/70 dark:border-red-500/50'
+              health.level === 'CRITICAL' || highLatency
+                ? 'border-red-500/75 dark:border-red-500/60'
+                : isSelected
+                ? 'border-[#FFD400]/80 dark:border-[#FFD400]/70'
                 : health.level === 'WARNING'
                 ? 'border-amber-400/70 dark:border-amber-500/45'
                 : 'border-stone-200 dark:border-white/10';
@@ -779,6 +1440,23 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                 className={`p-5 rounded-xl bg-white dark:bg-[#161618] border ${cardBorderClass} space-y-4`}
               >
                 <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    {canManage && (
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={isSelected}
+                        aria-label={`Select ${r.name} for bulk command`}
+                        onClick={() => toggleSelectRouter(r.id)}
+                        className={`mt-0.5 p-1 rounded-md border transition-colors shrink-0 ${
+                          isSelected
+                            ? 'bg-[#FFD400]/15 border-[#FFD400]/60 text-[#9A7B00] dark:text-[#FFD400]'
+                            : 'bg-stone-50 dark:bg-[#101010] border-stone-200 dark:border-white/15 text-slate-400 hover:text-slate-700 dark:hover:text-zinc-200'
+                        }`}
+                      >
+                        {isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                      </button>
+                    )}
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="text-base font-bold">{r.name}</h3>
@@ -803,6 +1481,23 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                           ? health.label
                           : 'No MikroTik router connected'}
                       </span>
+                      {lastPing && lastPing.reachable && lastPing.roundTripMs !== null && (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono tabular-nums font-bold border ${
+                            highLatency
+                              ? 'bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/35'
+                              : 'bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                          }`}
+                        >
+                          <Gauge className="w-3 h-3" />
+                          RTT {lastPing.roundTripMs.toFixed(2)} ms{highLatency ? ` (> ${ROUTER_RTT_ALERT_MS}ms)` : ''}
+                        </span>
+                      )}
+                      {lastPing && !lastPing.reachable && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono font-semibold bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                          Ping Unreachable
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs font-mono text-slate-500 dark:text-[#8793A5] mt-0.5">
                       {r.host ? `${r.host}:${r.apiPort} ${r.useTls ? 'TLS' : 'TCP'}` : 'Host not configured'}
@@ -811,6 +1506,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                       {r.username ? ` · User: ${r.username}` : ''}
                       {r.hotspotServer ? ` · Server: ${r.hotspotServer}` : ''}
                     </p>
+                  </div>
                   </div>
 
                   {canDelete && (
@@ -939,6 +1635,21 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                   </div>
                 )}
 
+                {highLatency && lastPing?.roundTripMs !== null && lastPing?.roundTripMs !== undefined && (
+                  <div
+                    role="alert"
+                    className="p-3 rounded-lg border border-red-400/70 dark:border-red-500/50 bg-red-50 dark:bg-red-950/35 text-xs text-red-700 dark:text-red-300 flex items-start gap-2"
+                  >
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-500" />
+                    <div>
+                      <p className="font-semibold">Unstable Connection Latency Alert</p>
+                      <p className="text-[11px] font-mono tabular-nums mt-0.5">
+                        Ping RTT {lastPing.roundTripMs.toFixed(2)} ms exceeds {ROUTER_RTT_ALERT_MS} ms threshold ({lastPing.host}:{lastPing.port}).
+                      </p>
+                    </div>
+                  </div>
+                )}
+
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs">
                 <div className="flex items-center gap-2">
                   {canManage && (
@@ -986,6 +1697,16 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
                   </button>
                   <button
                     type="button"
+                    onClick={() => setAnalyticsRouterId(r.id)}
+                    title="View 24-hour CPU & memory analytics"
+                    aria-label={`24h Analytics for ${r.name}`}
+                    className="btn-chip-accent"
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" />
+                    Analytics
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => handleViewInterfaces(r)}
                     className="btn-chip-accent"
                   >
@@ -1006,6 +1727,7 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
             </div>
             );
           })}
+          </div>
         </div>
       )}
 
@@ -1253,62 +1975,333 @@ export function RoutersView({ token, refreshTrigger, canManage, canDelete }: Pro
         )}
       </MobileModal>
 
-      <AnimatePresence>
-        {pingToast && (
-          <motion.div
-            key={pingToast.checkedAt + pingToast.routerId}
-            initial={{ opacity: 0, y: 16, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 12, scale: 0.96 }}
-            transition={NATIVE_SPRING}
-            role="status"
-            aria-live="polite"
-            className={`no-print fixed bottom-5 right-5 z-50 w-[min(92vw,22rem)] rounded-xl border px-3.5 py-2.5 shadow-lg bg-white dark:bg-[#161618] ${
-              pingToast.reachable
-                ? 'border-emerald-500/40'
-                : 'border-amber-500/45'
-            }`}
+      <MobileModal
+        open={bulkModalOpen}
+        onClose={() => setBulkModalOpen(false)}
+        maxWidthClass="max-w-xl"
+        panelClassName="space-y-4"
+        ariaLabel="Bulk Command Configuration Push"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-[#9A7B00] dark:text-[#FFD400]" />
+              Bulk Command Push
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-[#8793A5] mt-0.5">
+              Push a shared RouterOS configuration update simultaneously to {selectedRouters.length} selected router(s).
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setBulkModalOpen(false)}
+            aria-label="Close bulk command modal"
+            className="btn-icon min-h-[34px] min-w-[34px] p-1.5"
           >
-            <div className="flex items-start justify-between gap-2.5">
-              <div className="flex items-start gap-2.5 min-w-0">
-                <div
-                  className={`mt-0.5 p-1.5 rounded-lg shrink-0 ${
-                    pingToast.reachable
-                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                      : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
-                  }`}
-                >
-                  <Gauge className="w-4 h-4" />
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="text-[11px] font-mono text-slate-600 dark:text-zinc-300 p-2.5 rounded-lg bg-stone-50 dark:bg-[#101010] border border-stone-200 dark:border-white/10">
+          Targets: {selectedRouters.map((r) => `${r.name}${r.host ? ` (${r.host})` : ''}`).join(' · ') || 'None selected'}
+        </div>
+
+        <div className="btn-tab-group flex-wrap">
+          {(
+            [
+              { id: 'UPDATE_SSID', label: 'Update SSID' },
+              { id: 'UPDATE_NTP', label: 'NTP Server' },
+              { id: 'SET_DNS_SERVERS', label: 'DNS Servers' },
+              { id: 'SET_TIMEZONE', label: 'Timezone' },
+            ] as const
+          ).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => {
+                setBulkCommandType(tab.id);
+                setBulkError(null);
+              }}
+              className={bulkCommandType === tab.id ? 'btn-tab-active' : 'btn-tab'}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={handleRunBulkCommand} className="space-y-3.5 text-xs">
+          {bulkCommandType === 'UPDATE_SSID' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label htmlFor="bulk-ssid" className="block font-medium mb-1">
+                  Shared WiFi SSID
+                </label>
+                <input
+                  id="bulk-ssid"
+                  type="text"
+                  required
+                  maxLength={32}
+                  value={bulkSsid}
+                  onChange={(e) => setBulkSsid(e.target.value)}
+                  placeholder="TRAX-LINK-WIFI"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+                />
+              </div>
+              <div>
+                <label htmlFor="bulk-wifi-iface" className="block font-medium mb-1">
+                  Wireless Interface (Optional)
+                </label>
+                <input
+                  id="bulk-wifi-iface"
+                  type="text"
+                  value={bulkWifiIface}
+                  onChange={(e) => setBulkWifiIface(e.target.value)}
+                  placeholder="Blank = all wireless/wifi interfaces"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+                />
+              </div>
+            </div>
+          )}
+
+          {bulkCommandType === 'UPDATE_NTP' && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="bulk-ntp-primary" className="block font-medium mb-1">
+                    Primary NTP Server
+                  </label>
+                  <input
+                    id="bulk-ntp-primary"
+                    type="text"
+                    required
+                    value={bulkNtpPrimary}
+                    onChange={(e) => setBulkNtpPrimary(e.target.value)}
+                    placeholder="pool.ntp.org"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+                  />
                 </div>
-                <div className="min-w-0 text-xs">
-                  <p className="font-semibold text-slate-900 dark:text-white truncate">
-                    {pingToast.reachable ? `Ping OK · ${pingToast.routerName}` : `Ping Unreachable · ${pingToast.routerName}`}
-                  </p>
-                  {pingToast.reachable && pingToast.roundTripMs !== null ? (
-                    <p className="font-mono tabular-nums text-emerald-600 dark:text-emerald-400 font-bold mt-0.5">
-                      RTT {pingToast.roundTripMs.toFixed(2)} ms
-                      <span className="font-normal text-slate-500 dark:text-[#8793A5] ml-1.5">
-                        ({pingToast.host}:{pingToast.port})
-                      </span>
-                    </p>
-                  ) : (
-                    <p className="text-[11px] text-slate-500 dark:text-[#8793A5] mt-0.5 break-words">
-                      {pingToast.error || 'Target host did not respond'}
-                    </p>
-                  )}
+                <div>
+                  <label htmlFor="bulk-ntp-secondary" className="block font-medium mb-1">
+                    Secondary NTP Server (Optional)
+                  </label>
+                  <input
+                    id="bulk-ntp-secondary"
+                    type="text"
+                    value={bulkNtpSecondary}
+                    onChange={(e) => setBulkNtpSecondary(e.target.value)}
+                    placeholder="time.cloudflare.com"
+                    className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+                  />
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setPingToast(null)}
-                aria-label="Dismiss ping status"
-                className="btn-icon min-h-[26px] min-w-[26px] p-1 shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={bulkNtpEnabled}
+                  onChange={(e) => setBulkNtpEnabled(e.target.checked)}
+                />
+                <span>Enable RouterOS NTP Client</span>
+              </label>
             </div>
-          </motion.div>
-        )}
+          )}
+
+          {bulkCommandType === 'SET_DNS_SERVERS' && (
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="bulk-dns-servers" className="block font-medium mb-1">
+                  DNS Servers (Comma-Separated IPs)
+                </label>
+                <input
+                  id="bulk-dns-servers"
+                  type="text"
+                  required
+                  value={bulkDnsServers}
+                  onChange={(e) => setBulkDnsServers(e.target.value)}
+                  placeholder="1.1.1.1,8.8.8.8"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+                />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={bulkDnsRemote}
+                  onChange={(e) => setBulkDnsRemote(e.target.checked)}
+                />
+                <span>Allow Remote DNS Requests</span>
+              </label>
+            </div>
+          )}
+
+          {bulkCommandType === 'SET_TIMEZONE' && (
+            <div>
+              <label htmlFor="bulk-timezone" className="block font-medium mb-1">
+                RouterOS Timezone Name
+              </label>
+              <input
+                id="bulk-timezone"
+                type="text"
+                required
+                value={bulkTimezone}
+                onChange={(e) => setBulkTimezone(e.target.value)}
+                placeholder="Africa/Dar_es_Salaam"
+                className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010] font-mono"
+              />
+            </div>
+          )}
+
+          {bulkError && (
+            <div className="p-3 rounded-lg border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300">
+              {bulkError}
+            </div>
+          )}
+
+          {bulkResult && (
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
+                <span className="font-semibold text-slate-900 dark:text-white">
+                  Execution Summary ({bulkResult.commandType})
+                </span>
+                <span>
+                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                    {bulkResult.succeededCount} succeeded
+                  </span>
+                  <span className="mx-1.5 text-slate-400">·</span>
+                  <span className={bulkResult.failedCount > 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-slate-500'}>
+                    {bulkResult.failedCount} failed
+                  </span>
+                </span>
+              </div>
+              <div className="max-h-48 overflow-y-auto divide-y divide-stone-200 dark:divide-white/10 rounded-lg border border-stone-200 dark:border-white/10 bg-stone-50 dark:bg-[#101010]">
+                {bulkResult.results.map((item) => (
+                  <div key={item.routerId} className="p-2.5 flex items-start justify-between gap-2 text-xs">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900 dark:text-white truncate">
+                        {item.routerName}
+                        {item.host ? ` (${item.host}:${item.apiPort})` : ''}
+                      </p>
+                      <p className="text-[11px] font-mono text-slate-500 dark:text-[#8793A5] mt-0.5 break-words">
+                        {item.success ? item.summary : item.error}
+                      </p>
+                    </div>
+                    <span
+                      className={`inline-flex items-center gap-1 font-mono text-[11px] font-bold shrink-0 ${
+                        item.success
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-red-600 dark:text-red-400'
+                      }`}
+                    >
+                      {item.success ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+                      {item.success ? 'OK' : 'FAILED'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2.5 pt-1">
+            <button
+              type="button"
+              onClick={() => setBulkModalOpen(false)}
+              className="btn-secondary text-xs"
+            >
+              Close
+            </button>
+            <button
+              type="submit"
+              disabled={bulkSubmitting || selectedRouterIds.length === 0}
+              className="btn-primary text-xs"
+            >
+              <Terminal className={`w-3.5 h-3.5 ${bulkSubmitting ? 'animate-spin' : ''}`} />
+              {bulkSubmitting
+                ? 'Pushing Configuration...'
+                : `Push to ${selectedRouterIds.length} Router(s)`}
+            </button>
+          </div>
+        </form>
+      </MobileModal>
+
+      <AnimatePresence>
+        {pingToast && (() => {
+          const toastLatency = evaluatePingLatency(pingToast);
+          const isHighLatency = toastLatency.exceedsThreshold;
+          return (
+            <motion.div
+              key={pingToast.checkedAt + pingToast.routerId}
+              initial={{ opacity: 0, y: 16, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.96 }}
+              transition={NATIVE_SPRING}
+              role="status"
+              aria-live="polite"
+              className={`no-print fixed bottom-5 right-5 z-50 w-[min(92vw,22rem)] rounded-xl border px-3.5 py-2.5 shadow-lg bg-white dark:bg-[#161618] ${
+                isHighLatency
+                  ? 'border-red-500/65'
+                  : pingToast.reachable
+                  ? 'border-emerald-500/40'
+                  : 'border-amber-500/45'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2.5">
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <div
+                    className={`mt-0.5 p-1.5 rounded-lg shrink-0 ${
+                      isHighLatency
+                        ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+                        : pingToast.reachable
+                        ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                        : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                    }`}
+                  >
+                    {isHighLatency ? <AlertTriangle className="w-4 h-4" /> : <Gauge className="w-4 h-4" />}
+                  </div>
+                  <div className="min-w-0 text-xs">
+                    <p
+                      className={`font-semibold truncate ${
+                        isHighLatency
+                          ? 'text-red-600 dark:text-red-400'
+                          : 'text-slate-900 dark:text-white'
+                      }`}
+                    >
+                      {isHighLatency
+                        ? `High Latency · ${pingToast.routerName}`
+                        : pingToast.reachable
+                        ? `Ping OK · ${pingToast.routerName}`
+                        : `Ping Unreachable · ${pingToast.routerName}`}
+                    </p>
+                    {pingToast.reachable && pingToast.roundTripMs !== null ? (
+                      <p
+                        className={`font-mono tabular-nums font-bold mt-0.5 ${
+                          isHighLatency
+                            ? 'text-red-600 dark:text-red-400'
+                            : 'text-emerald-600 dark:text-emerald-400'
+                        }`}
+                      >
+                        RTT {pingToast.roundTripMs.toFixed(2)} ms
+                        {isHighLatency ? ` (> ${ROUTER_RTT_ALERT_MS}ms)` : ''}
+                        <span className="font-normal text-slate-500 dark:text-[#8793A5] ml-1.5">
+                          ({pingToast.host}:{pingToast.port})
+                        </span>
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-slate-500 dark:text-[#8793A5] mt-0.5 break-words">
+                        {pingToast.error || 'Target host did not respond'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPingToast(null)}
+                  aria-label="Dismiss ping status"
+                  className="btn-icon min-h-[26px] min-w-[26px] p-1 shrink-0"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </motion.div>
+          );
+        })()}
       </AnimatePresence>
     </div>
   );

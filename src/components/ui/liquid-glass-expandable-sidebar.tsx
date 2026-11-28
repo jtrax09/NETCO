@@ -161,6 +161,10 @@ const navigationStyles = `
   font-size: .875rem;
   font-weight: 700;
 }
+.gn-sidebar-brand-copy strong {
+  font-family: var(--font-brand, inherit);
+  letter-spacing: 0.1em;
+}
 .gn-sidebar-brand-copy small, .gn-sidebar-account small {
   display: block;
   margin-block-start: 2px;

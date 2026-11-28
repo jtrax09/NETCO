@@ -58,13 +58,21 @@ from .services.billing import (
     suspend_subscription_and_disconnect,
 )
 from .services.mikrotik import (
+    auto_sync_package_profile_to_routers,
+    execute_bulk_router_command,
     generate_mikrotik_wireguard_snippet,
+    get_router_auto_sync_setting,
+    get_router_telemetry_history,
     get_routers_bandwidth_overview,
     ping_router_host,
+    probe_wifi_gateway,
     push_hotspot_profile_to_router,
     record_connected_routers_bandwidth_sample,
+    scan_network_for_routers,
+    set_router_auto_sync_setting,
     sync_router_telemetry,
     terminate_router_session,
+    validate_wifi_gateway_ip,
 )
 from .services.payments import (
     SUPPORTED_PROVIDERS,
@@ -81,7 +89,7 @@ from .services.vouchers import (
     redeem_voucher_for_device,
     validate_voucher_code,
 )
-from .validators import clean_bool, clean_enum, clean_int, clean_opt_str, clean_str, is_valid_email
+from .validators import clean_bool, clean_enum, clean_int, clean_opt_str, clean_str, is_valid_email, is_valid_http_url
 
 ALL_STAFF_ROLES = set(ALL_BUSINESS_ROLES)
 
@@ -845,7 +853,9 @@ def make_handler_class(
                 if method == "GET" and path == "/api/portal/businesses":
                     businesses = db.query_all(
                         """
-                        SELECT id, name, slug, hotspot_title as hotspotTitle, hotspot_support_phone as hotspotSupportPhone, country, currency
+                        SELECT id, name, slug, hotspot_title as hotspotTitle, hotspot_support_phone as hotspotSupportPhone,
+                               description, physical_address as physicalAddress, city, website_url as websiteUrl,
+                               support_hours as supportHours, wifi_ssid as wifiSsid, country, currency
                         FROM businesses WHERE status = 'ACTIVE' ORDER BY created_at ASC
                         """
                     )
@@ -1592,6 +1602,91 @@ def make_handler_class(
                     )
                     return self._send_json(201, {"ok": True, "reference": ref, "amountTzs": amt, "planCode": plan_code.upper()})
 
+                if method == "GET" and path == "/api/business/details":
+                    actor = self._require_auth(ALL_BUSINESS_ROLES)
+                    if not actor:
+                        return
+                    biz_id = self._resolve_scope(actor, qs, None, path)
+                    if not biz_id:
+                        return
+                    business = db.query_one(
+                        """
+                        SELECT id, name, slug, email, phone, country, currency, status, timezone,
+                               hotspot_title as hotspotTitle, hotspot_support_phone as hotspotSupportPhone,
+                               description, physical_address as physicalAddress, city, website_url as websiteUrl,
+                               support_hours as supportHours, wifi_ssid as wifiSsid, wifi_gateway_ip as wifiGatewayIp,
+                               wifi_gateway_type as wifiGatewayType, auto_sync_profiles as autoSyncProfiles,
+                               created_at as createdAt, updated_at as updatedAt
+                        FROM businesses WHERE id = ?
+                        """,
+                        (biz_id,),
+                    )
+                    if not business:
+                        return self._send_json(404, {"error": "Business workspace not found"})
+                    business["autoSyncProfiles"] = bool(business.get("autoSyncProfiles"))
+
+                    plan = db.query_one(
+                        """
+                        SELECT p.code as planCode, p.name as planName, p.price_tzs as priceTzs,
+                               p.max_routers as maxRouters, p.max_locations as maxLocations,
+                               p.max_active_customers as maxActiveCustomers, ss.status as subscriptionStatus,
+                               ss.billing_cycle as billingCycle, ss.current_period_start as currentPeriodStart,
+                               ss.current_period_end as currentPeriodEnd
+                        FROM saas_subscriptions ss
+                        JOIN saas_plans p ON p.id = ss.plan_id
+                        WHERE ss.business_id = ?
+                        ORDER BY ss.created_at DESC LIMIT 1
+                        """,
+                        (biz_id,),
+                    )
+
+                    locations = db.query_all(
+                        """
+                        SELECT l.id, l.name, l.region, l.address, l.gps_coordinates as gpsCoordinates,
+                               (SELECT COUNT(*) FROM routers r WHERE r.location_id = l.id AND r.business_id = ?) as routerCount
+                        FROM locations l
+                        WHERE l.business_id = ?
+                        ORDER BY l.created_at ASC
+                        """,
+                        (biz_id, biz_id),
+                    )
+
+                    packages_summary = db.query_all(
+                        """
+                        SELECT id, name, category, package_type as packageType, price_tzs as priceTzs, currency,
+                               duration_minutes as durationMinutes, download_kbps as downloadKbps,
+                               upload_kbps as uploadKbps, is_active as isActive
+                        FROM packages
+                        WHERE business_id = ? AND is_active = 1
+                        ORDER BY price_tzs ASC
+                        """,
+                        (biz_id,),
+                    )
+
+                    metrics = {
+                        "locationsCount": int((db.query_one("SELECT COUNT(*) as c FROM locations WHERE business_id = ?", (biz_id,)) or {"c": 0})["c"]),
+                        "routersCount": int((db.query_one("SELECT COUNT(*) as c FROM routers WHERE business_id = ?", (biz_id,)) or {"c": 0})["c"]),
+                        "connectedRoutersCount": int((db.query_one("SELECT COUNT(*) as c FROM routers WHERE business_id = ? AND status = 'CONNECTED'", (biz_id,)) or {"c": 0})["c"]),
+                        "activePackagesCount": len(packages_summary),
+                        "totalPackagesCount": int((db.query_one("SELECT COUNT(*) as c FROM packages WHERE business_id = ?", (biz_id,)) or {"c": 0})["c"]),
+                        "activeCustomersCount": int((db.query_one("SELECT COUNT(*) as c FROM customers WHERE business_id = ? AND is_active = 1", (biz_id,)) or {"c": 0})["c"]),
+                        "totalVouchersCount": int((db.query_one("SELECT COUNT(*) as c FROM vouchers WHERE business_id = ?", (biz_id,)) or {"c": 0})["c"]),
+                        "activeSessionsCount": int((db.query_one("SELECT COUNT(*) as c FROM sessions WHERE business_id = ? AND status = 'ACTIVE'", (biz_id,)) or {"c": 0})["c"]),
+                        "teamCount": int((db.query_one("SELECT COUNT(*) as c FROM admin_users WHERE business_id = ? AND is_active = 1", (biz_id,)) or {"c": 0})["c"]),
+                    }
+
+                    return self._send_json(
+                        200,
+                        {
+                            "business": business,
+                            "operatingMode": get_operating_mode(db),
+                            "plan": plan,
+                            "metrics": metrics,
+                            "locations": locations,
+                            "packagesSummary": packages_summary,
+                        },
+                    )
+
                 if method == "GET" and path == "/api/business/settings":
                     actor = self._require_auth(ALL_BUSINESS_ROLES)
                     if not actor:
@@ -1603,6 +1698,9 @@ def make_handler_class(
                         """
                         SELECT id, name, slug, email, phone, country, currency, status, timezone,
                                hotspot_title as hotspotTitle, hotspot_support_phone as hotspotSupportPhone,
+                               description, physical_address as physicalAddress, city, website_url as websiteUrl,
+                               support_hours as supportHours, wifi_ssid as wifiSsid, wifi_gateway_ip as wifiGatewayIp,
+                               wifi_gateway_type as wifiGatewayType, auto_sync_profiles as autoSyncProfiles,
                                created_at as createdAt, updated_at as updatedAt
                         FROM businesses WHERE id = ?
                         """,
@@ -1610,6 +1708,7 @@ def make_handler_class(
                     )
                     if not business:
                         return self._send_json(404, {"error": "Business workspace not found"})
+                    business["autoSyncProfiles"] = bool(business.get("autoSyncProfiles"))
                     plan = db.query_one(
                         """
                         SELECT p.code as planCode, p.name as planName, p.max_routers as maxRouters,
@@ -1681,6 +1780,32 @@ def make_handler_class(
                         if "hotspotSupportPhone" in body
                         else existing.get("hotspot_support_phone")
                     )
+                    b_description = (
+                        clean_opt_str(body.get("description"), 400)
+                        if "description" in body
+                        else existing.get("description")
+                    )
+                    b_physical_address = (
+                        clean_opt_str(body.get("physicalAddress"), 180)
+                        if "physicalAddress" in body
+                        else existing.get("physical_address")
+                    )
+                    b_city = (
+                        clean_opt_str(body.get("city"), 80)
+                        if "city" in body
+                        else existing.get("city")
+                    )
+                    b_support_hours = (
+                        clean_opt_str(body.get("supportHours"), 100)
+                        if "supportHours" in body
+                        else existing.get("support_hours")
+                    )
+                    if "websiteUrl" in body:
+                        b_website_url = clean_opt_str(body.get("websiteUrl"), 240)
+                        if b_website_url and not is_valid_http_url(b_website_url):
+                            return self._send_json(400, {"error": "Website URL must be a valid http:// or https:// address."})
+                    else:
+                        b_website_url = existing.get("website_url")
 
                     if not b_name or not b_email or not is_valid_email(b_email) or not b_phone or not b_country or not b_currency or not b_timezone:
                         return self._send_json(400, {"error": "Invalid business settings fields"})
@@ -1690,7 +1815,8 @@ def make_handler_class(
                         """
                         UPDATE businesses
                         SET name = ?, email = ?, phone = ?, country = ?, currency = ?, timezone = ?,
-                            hotspot_title = ?, hotspot_support_phone = ?, updated_at = ?
+                            hotspot_title = ?, hotspot_support_phone = ?, description = ?,
+                            physical_address = ?, city = ?, website_url = ?, support_hours = ?, updated_at = ?
                         WHERE id = ?
                         """,
                         (
@@ -1702,6 +1828,11 @@ def make_handler_class(
                             b_timezone,
                             b_hotspot_title,
                             b_support_phone,
+                            b_description,
+                            b_physical_address,
+                            b_city,
+                            b_website_url,
+                            b_support_hours,
                             now_iso,
                             biz_id,
                         ),
@@ -1710,11 +1841,16 @@ def make_handler_class(
                         """
                         SELECT id, name, slug, email, phone, country, currency, status, timezone,
                                hotspot_title as hotspotTitle, hotspot_support_phone as hotspotSupportPhone,
+                               description, physical_address as physicalAddress, city, website_url as websiteUrl,
+                               support_hours as supportHours, wifi_ssid as wifiSsid, wifi_gateway_ip as wifiGatewayIp,
+                               wifi_gateway_type as wifiGatewayType, auto_sync_profiles as autoSyncProfiles,
                                created_at as createdAt, updated_at as updatedAt
                         FROM businesses WHERE id = ?
                         """,
                         (biz_id,),
                     )
+                    if updated:
+                        updated["autoSyncProfiles"] = bool(updated.get("autoSyncProfiles"))
                     record_audit_log(
                         db,
                         actor,
@@ -1726,6 +1862,266 @@ def make_handler_class(
                     )
                     self._emit(events, "business:updated", {"businessId": biz_id, "name": b_name})
                     return self._send_json(200, {"settings": updated}, events)
+
+                # ---------------------------------------------------------------
+                # ADMIN WIFI QUICK-CONNECT (STANDALONE WIFI / MIKROTIK ROUTER)
+                # ---------------------------------------------------------------
+                if method == "GET" and path == "/api/wifi/status":
+                    actor = self._require_auth(ALL_BUSINESS_ROLES)
+                    if not actor:
+                        return
+                    biz_id = self._resolve_scope(actor, qs, None, path)
+                    if not biz_id:
+                        return
+                    biz = db.query_one(
+                        """
+                        SELECT id, name, hotspot_title as hotspotTitle, wifi_ssid as wifiSsid,
+                               wifi_gateway_ip as wifiGatewayIp, wifi_gateway_type as wifiGatewayType,
+                               updated_at as updatedAt
+                        FROM businesses WHERE id = ?
+                        """,
+                        (biz_id,),
+                    )
+                    if not biz:
+                        return self._send_json(404, {"error": "Business workspace not found"})
+                    routers = db.query_all(
+                        """
+                        SELECT id, name, host, api_port as apiPort, use_tls as useTls, status,
+                               hotspot_server as hotspotServer, router_os_family as routerOsFamily,
+                               last_error as lastError, last_checked_at as lastCheckedAt
+                        FROM routers WHERE business_id = ? ORDER BY created_at DESC
+                        """,
+                        (biz_id,),
+                    )
+                    linked_router = None
+                    gw_ip = str(biz.get("wifiGatewayIp") or "").strip()
+                    if gw_ip:
+                        linked_router = next((r for r in routers if str(r.get("host") or "").strip() == gw_ip), None)
+                    if not linked_router:
+                        linked_router = next((r for r in routers if r.get("status") == "CONNECTED"), None) or (routers[0] if routers else None)
+
+                    return self._send_json(
+                        200,
+                        {
+                            "businessId": biz_id,
+                            "businessName": biz["name"],
+                            "hotspotTitle": biz.get("hotspotTitle"),
+                            "wifiSsid": biz.get("wifiSsid"),
+                            "wifiGatewayIp": biz.get("wifiGatewayIp"),
+                            "wifiGatewayType": biz.get("wifiGatewayType"),
+                            "operatingMode": get_operating_mode(db),
+                            "linkedRouter": linked_router,
+                            "updatedAt": biz.get("updatedAt"),
+                        },
+                    )
+
+                if method == "POST" and path == "/api/wifi/connect":
+                    actor = self._require_auth(NETWORK_ROLES)
+                    if not actor:
+                        return
+                    body, _, err = self._read_json()
+                    if err or body is None:
+                        return self._send_json(err[0], {"error": err[1]})
+                    biz_id = self._resolve_scope(actor, qs, body, path)
+                    if not biz_id:
+                        return
+                    existing = db.query_one("SELECT * FROM businesses WHERE id = ?", (biz_id,))
+                    if not existing:
+                        return self._send_json(404, {"error": "Business workspace not found"})
+
+                    wifi_ssid = clean_str(body.get("wifiSsid"), 1, 32)
+                    if not wifi_ssid:
+                        return self._send_json(400, {"error": "WiFi Network Name (SSID) must be 1 to 32 characters."})
+
+                    gw_type = clean_enum(
+                        body.get("gatewayType"),
+                        {"MIKROTIK", "POCKET_WIFI", "STANDARD_ROUTER"},
+                        "STANDARD_ROUTER",
+                    )
+                    if not gw_type:
+                        return self._send_json(400, {"error": "gatewayType must be MIKROTIK, POCKET_WIFI, or STANDARD_ROUTER."})
+
+                    raw_gw = str(body.get("gatewayIp") or "").strip()
+                    try:
+                        gw_ip = validate_wifi_gateway_ip(raw_gw)
+                    except ValueError as exc:
+                        return self._send_json(400, {"error": str(exc)})
+
+                    if gw_type == "MIKROTIK" and not gw_ip:
+                        return self._send_json(400, {"error": "Enter your MikroTik router LAN or WireGuard IPv4 address (e.g. 192.168.88.1)."})
+
+                    api_port = clean_int(body.get("apiPort"), 1, 65535, 8728)
+                    use_tls = clean_bool(body.get("useTls"), False)
+                    ros_user = str(body.get("username") or "").strip()[:80]
+                    ros_pass = str(body.get("password") or "").strip()[:128]
+                    hotspot_server = str(body.get("hotspotServer") or "").strip()[:80]
+                    update_router_ssid = clean_bool(body.get("updateRouterSsid"), False)
+                    if api_port is None or use_tls is None or update_router_ssid is None:
+                        return self._send_json(400, {"error": "Invalid WiFi connection options."})
+
+                    now_iso = utc_now_iso()
+                    hotspot_title = existing.get("hotspot_title") or wifi_ssid
+                    db.execute(
+                        """
+                        UPDATE businesses
+                        SET wifi_ssid = ?, wifi_gateway_ip = ?, wifi_gateway_type = ?,
+                            hotspot_title = COALESCE(hotspot_title, ?), updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (wifi_ssid, gw_ip or None, gw_type, hotspot_title, now_iso, biz_id),
+                    )
+
+                    probe_res = probe_wifi_gateway(gw_ip) if gw_ip else {"reachable": False, "port": None, "roundTripMs": None, "error": None}
+                    router_row = None
+                    telemetry_dict = None
+                    ssid_push_result = None
+
+                    if gw_type == "MIKROTIK" and gw_ip:
+                        existing_router = db.query_one(
+                            "SELECT * FROM routers WHERE business_id = ? AND host = ? AND api_port = ?",
+                            (biz_id, gw_ip, api_port),
+                        )
+                        if existing_router:
+                            rid = str(existing_router["id"])
+                            if ros_user or ros_pass or hotspot_server:
+                                db.execute(
+                                    """
+                                    UPDATE routers
+                                    SET username = CASE WHEN ? != '' THEN ? ELSE username END,
+                                        password_encrypted = CASE WHEN ? != '' THEN ? ELSE password_encrypted END,
+                                        hotspot_server = CASE WHEN ? != '' THEN ? ELSE hotspot_server END,
+                                        use_tls = ?, updated_at = ?
+                                    WHERE id = ? AND business_id = ?
+                                    """,
+                                    (
+                                        ros_user,
+                                        ros_user,
+                                        ros_pass,
+                                        encrypt_secret(ros_pass) if ros_pass else "",
+                                        hotspot_server,
+                                        hotspot_server,
+                                        1 if use_tls else 0,
+                                        now_iso,
+                                        rid,
+                                        biz_id,
+                                    ),
+                                )
+                        else:
+                            rid = generate_id("rtr")
+                            base_name = f"{wifi_ssid} Gateway"[:80]
+                            if db.query_one("SELECT id FROM routers WHERE business_id = ? AND LOWER(name) = LOWER(?)", (biz_id, base_name)):
+                                base_name = f"{wifi_ssid} ({gw_ip})"[:80]
+                            db.execute(
+                                """
+                                INSERT INTO routers (
+                                  id, business_id, name, host, api_port, use_tls, username, password_encrypted,
+                                  hotspot_server, router_os_family, radius_secret, status, last_error, created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ROUTEROS_V7', ?, 'NOT_CONNECTED', ?, ?, ?)
+                                """,
+                                (
+                                    rid,
+                                    biz_id,
+                                    base_name,
+                                    gw_ip,
+                                    api_port,
+                                    1 if use_tls else 0,
+                                    ros_user,
+                                    encrypt_secret(ros_pass) if ros_pass else "",
+                                    hotspot_server,
+                                    secrets.token_hex(12),
+                                    None if (ros_user and ros_pass) else "Awaiting RouterOS credentials",
+                                    now_iso,
+                                    now_iso,
+                                ),
+                            )
+
+                        telemetry = sync_router_telemetry(db, rid)
+                        telemetry_dict = telemetry.to_dict()
+                        if telemetry.connected:
+                            set_operating_mode(db, "MIKROTIK_MODE")
+                            if update_router_ssid:
+                                router_full = db.query_one("SELECT * FROM routers WHERE id = ?", (rid,))
+                                if router_full:
+                                    ssid_push_result = execute_bulk_router_command(
+                                        [router_full],
+                                        "UPDATE_SSID",
+                                        {"ssid": wifi_ssid},
+                                    )
+
+                        router_row = db.query_one(
+                            """
+                            SELECT id, name, host, api_port as apiPort, use_tls as useTls, username,
+                                   hotspot_server as hotspotServer, router_os_family as routerOsFamily,
+                                   status, cpu_load as cpuLoad, uptime, router_os_version as routerOsVersion,
+                                   board_name as boardName, last_error as lastError, last_checked_at as lastCheckedAt
+                            FROM routers WHERE id = ?
+                            """,
+                            (rid,),
+                        )
+
+                    record_audit_log(
+                        db,
+                        actor,
+                        "ADMIN_WIFI_CONNECTED",
+                        "Business",
+                        biz_id,
+                        ip,
+                        {
+                            "wifiSsid": wifi_ssid,
+                            "gatewayIp": gw_ip or None,
+                            "gatewayType": gw_type,
+                            "gatewayReachable": probe_res["reachable"],
+                            "routerConnected": bool(telemetry_dict and telemetry_dict.get("connected")),
+                        },
+                    )
+                    self._emit(events, "business:updated", {"businessId": biz_id, "wifiSsid": wifi_ssid})
+                    self._emit(events, "router:status", {"businessId": biz_id, "wifiSsid": wifi_ssid})
+
+                    if gw_type == "MIKROTIK":
+                        if telemetry_dict and telemetry_dict.get("connected"):
+                            msg = f"Connected to MikroTik WiFi gateway '{wifi_ssid}' ({gw_ip})."
+                        else:
+                            err_hint = (telemetry_dict or {}).get("error") or "RouterOS host unreachable from server"
+                            msg = f"Saved WiFi '{wifi_ssid}' ({gw_ip}), awaiting reachable MikroTik connection: {err_hint}."
+                    elif gw_ip:
+                        if probe_res["reachable"]:
+                            msg = f"WiFi '{wifi_ssid}' linked and gateway {gw_ip} responded in {probe_res['roundTripMs']} ms."
+                        else:
+                            msg = f"WiFi '{wifi_ssid}' linked to your workspace in Standalone Mode (gateway {gw_ip} is on your local LAN)."
+                    else:
+                        msg = f"WiFi '{wifi_ssid}' linked to your workspace in Standalone Mode."
+
+                    return self._send_json(
+                        200,
+                        {
+                            "businessId": biz_id,
+                            "wifiSsid": wifi_ssid,
+                            "wifiGatewayIp": gw_ip or None,
+                            "wifiGatewayType": gw_type,
+                            "operatingMode": get_operating_mode(db),
+                            "gatewayProbe": probe_res,
+                            "router": router_row,
+                            "telemetry": telemetry_dict,
+                            "ssidPush": ssid_push_result,
+                            "message": msg,
+                        },
+                        events,
+                    )
+
+                if method == "DELETE" and path == "/api/wifi/connect":
+                    actor = self._require_auth(NETWORK_ROLES)
+                    if not actor:
+                        return
+                    biz_id = self._resolve_scope(actor, qs, None, path)
+                    if not biz_id:
+                        return
+                    db.execute(
+                        "UPDATE businesses SET wifi_ssid = NULL, wifi_gateway_ip = NULL, wifi_gateway_type = NULL, updated_at = ? WHERE id = ?",
+                        (utc_now_iso(), biz_id),
+                    )
+                    record_audit_log(db, actor, "ADMIN_WIFI_DISCONNECTED", "Business", biz_id, ip)
+                    self._emit(events, "business:updated", {"businessId": biz_id, "wifiSsid": None})
+                    return self._send_json(200, {"ok": True, "wifiSsid": None}, events)
 
                 if method == "GET" and path == "/api/locations":
                     actor = self._require_auth(ALL_BUSINESS_ROLES)
@@ -2331,7 +2727,24 @@ def make_handler_class(
                         """,
                         (pid,),
                     )
-                    return self._send_json(201, {"package": created})
+                    profile_sync = auto_sync_package_profile_to_routers(
+                        db, biz_id, created or {"id": pid, "download_kbps": dl, "upload_kbps": ul}
+                    )
+                    if profile_sync["enabled"] and (profile_sync["synced"] > 0 or profile_sync["failed"] > 0):
+                        record_audit_log(
+                            db,
+                            actor,
+                            "PACKAGE_AUTO_SYNCED_TO_ROUTERS",
+                            "Package",
+                            pid,
+                            ip,
+                            {
+                                "synced": profile_sync["synced"],
+                                "failed": profile_sync["failed"],
+                                "skipped": profile_sync["skipped"],
+                            },
+                        )
+                    return self._send_json(201, {"package": created, "profileSync": profile_sync})
 
                 m = re.fullmatch(r"/api/packages/([^/]+)", path)
                 if method == "PATCH" and m:
@@ -2406,7 +2819,24 @@ def make_handler_class(
                         """,
                         (pid,),
                     )
-                    return self._send_json(200, {"package": updated})
+                    profile_sync = auto_sync_package_profile_to_routers(
+                        db, biz_id, updated or {"id": pid, "download_kbps": ex["download_kbps"], "upload_kbps": ex["upload_kbps"]}
+                    )
+                    if profile_sync["enabled"] and (profile_sync["synced"] > 0 or profile_sync["failed"] > 0):
+                        record_audit_log(
+                            db,
+                            actor,
+                            "PACKAGE_AUTO_SYNCED_TO_ROUTERS",
+                            "Package",
+                            pid,
+                            ip,
+                            {
+                                "synced": profile_sync["synced"],
+                                "failed": profile_sync["failed"],
+                                "skipped": profile_sync["skipped"],
+                            },
+                        )
+                    return self._send_json(200, {"package": updated, "profileSync": profile_sync})
 
                 if method == "DELETE" and m:
                     actor = self._require_auth(BUSINESS_MANAGEMENT_ROLES)
@@ -2892,6 +3322,147 @@ def make_handler_class(
                     overview = get_routers_bandwidth_overview(db, biz_id)
                     return self._send_json(200, overview)
 
+                if method == "POST" and path == "/api/routers/scan":
+                    actor = self._require_auth(NETWORK_ROLES)
+                    if not actor:
+                        return
+                    body, _, err = self._read_json()
+                    if err or body is None:
+                        return self._send_json(err[0], {"error": err[1]})
+                    biz_id = self._resolve_scope(actor, qs, body, path)
+                    if not biz_id:
+                        return
+                    ip_range = str(body.get("ipRange") or "").strip()
+                    api_port = clean_int(body.get("apiPort"), 1, 65535, 8728)
+                    use_tls = clean_bool(body.get("useTls"), False)
+                    include_mndp = clean_bool(body.get("includeMndp"), True)
+                    mndp_port = clean_int(body.get("mndpPort"), 1, 65535, 5678)
+                    if api_port is None or use_tls is None or include_mndp is None or mndp_port is None:
+                        return self._send_json(400, {"error": "Invalid scan configuration parameters."})
+                    try:
+                        scan_res = scan_network_for_routers(
+                            db,
+                            biz_id,
+                            ip_range=ip_range,
+                            api_port=api_port,
+                            use_tls=use_tls,
+                            include_mndp=include_mndp,
+                            mndp_port=mndp_port,
+                        )
+                    except ValueError as exc:
+                        return self._send_json(400, {"error": str(exc)})
+                    record_audit_log(
+                        db,
+                        actor,
+                        "ROUTER_NETWORK_SCAN",
+                        "Router",
+                        None,
+                        ip,
+                        {
+                            "ipRange": scan_res["ipRange"],
+                            "scannedHosts": scan_res["scannedHosts"],
+                            "found": len(scan_res["discovered"]),
+                        },
+                    )
+                    return self._send_json(200, scan_res)
+
+                if method == "POST" and path == "/api/routers/bulk-command":
+                    actor = self._require_auth(NETWORK_ROLES)
+                    if not actor:
+                        return
+                    body, _, err = self._read_json()
+                    if err or body is None:
+                        return self._send_json(err[0], {"error": err[1]})
+                    biz_id = self._resolve_scope(actor, qs, body, path)
+                    if not biz_id:
+                        return
+                    raw_ids = body.get("routerIds")
+                    if not isinstance(raw_ids, list) or not raw_ids:
+                        return self._send_json(400, {"error": "Select at least one router ID in routerIds."})
+                    router_ids: list[str] = []
+                    seen_ids: set[str] = set()
+                    for item in raw_ids:
+                        rid = str(item or "").strip()
+                        if rid and rid not in seen_ids:
+                            seen_ids.add(rid)
+                            router_ids.append(rid)
+                    if not router_ids or len(router_ids) > 50:
+                        return self._send_json(400, {"error": "routerIds must contain between 1 and 50 unique router IDs."})
+
+                    target_rows: list[dict[str, Any]] = []
+                    for rid in router_ids:
+                        rrow = db.query_one("SELECT * FROM routers WHERE id = ?", (rid,))
+                        if not rrow:
+                            return self._send_json(404, {"error": f"Router not found: {rid}"})
+                        if str(rrow["business_id"]) != biz_id:
+                            return self._send_json(403, {"error": "Cross-tenant access denied"})
+                        target_rows.append(rrow)
+
+                    command_type = str(body.get("commandType") or "").strip().upper()
+                    params = body.get("params") if isinstance(body.get("params"), dict) else {}
+                    try:
+                        bulk_res = execute_bulk_router_command(target_rows, command_type, params)
+                    except ValueError as exc:
+                        return self._send_json(400, {"error": str(exc)})
+
+                    record_audit_log(
+                        db,
+                        actor,
+                        "ROUTER_BULK_COMMAND",
+                        "Router",
+                        None,
+                        ip,
+                        {
+                            "commandType": bulk_res["commandType"],
+                            "totalRequested": bulk_res["totalRequested"],
+                            "succeededCount": bulk_res["succeededCount"],
+                            "failedCount": bulk_res["failedCount"],
+                        },
+                    )
+                    return self._send_json(200, bulk_res)
+
+                if method == "GET" and path == "/api/routers/settings":
+                    actor = self._require_auth(ALL_BUSINESS_ROLES)
+                    if not actor:
+                        return
+                    biz_id = self._resolve_scope(actor, qs, None, path)
+                    if not biz_id:
+                        return
+                    try:
+                        setting = get_router_auto_sync_setting(db, biz_id)
+                    except ValueError as exc:
+                        return self._send_json(404, {"error": str(exc)})
+                    return self._send_json(200, setting)
+
+                if method == "PATCH" and path == "/api/routers/settings":
+                    actor = self._require_auth(NETWORK_ROLES)
+                    if not actor:
+                        return
+                    body, _, err = self._read_json()
+                    if err or body is None:
+                        return self._send_json(err[0], {"error": err[1]})
+                    biz_id = self._resolve_scope(actor, qs, body, path)
+                    if not biz_id:
+                        return
+                    auto_sync = clean_bool(body.get("autoSyncProfiles"))
+                    if auto_sync is None:
+                        return self._send_json(400, {"error": "autoSyncProfiles must be a boolean value."})
+                    try:
+                        updated_setting = set_router_auto_sync_setting(db, biz_id, auto_sync)
+                    except ValueError as exc:
+                        return self._send_json(404, {"error": str(exc)})
+                    record_audit_log(
+                        db,
+                        actor,
+                        "ROUTER_SETTINGS_UPDATED",
+                        "Business",
+                        biz_id,
+                        ip,
+                        {"autoSyncProfiles": auto_sync},
+                    )
+                    self._emit(events, "router:status", {"businessId": biz_id, "autoSyncProfiles": auto_sync})
+                    return self._send_json(200, updated_setting, events)
+
                 if method == "GET" and path == "/api/routers":
                     actor = self._require_auth(ALL_BUSINESS_ROLES)
                     if not actor:
@@ -3038,6 +3609,26 @@ def make_handler_class(
                         (rid,),
                     )
                     return self._send_json(200, {"interfaces": ifaces})
+
+                m = re.fullmatch(r"/api/routers/([^/]+)/telemetry", path)
+                if method == "GET" and m:
+                    actor = self._require_auth(ALL_BUSINESS_ROLES)
+                    if not actor:
+                        return
+                    biz_id = self._resolve_scope(actor, qs, None, path)
+                    if not biz_id:
+                        return
+                    rid = urllib.parse.unquote(m.group(1))
+                    rrow = db.query_one("SELECT id, business_id FROM routers WHERE id = ?", (rid,))
+                    if not rrow:
+                        return self._send_json(404, {"error": "Router not found"})
+                    if str(rrow["business_id"]) != biz_id:
+                        return self._send_json(403, {"error": "Cross-tenant access denied"})
+                    if qs.get("poll") == "1" and actor.role in NETWORK_ROLES:
+                        sync_router_telemetry(db, rid)
+                    hours = clean_int(qs.get("hours"), 1, 168, 24) or 24
+                    history = get_router_telemetry_history(db, biz_id, rid, hours=hours)
+                    return self._send_json(200, history)
 
                 m = re.fullmatch(r"/api/routers/([^/]+)/sync-profiles", path)
                 if method == "POST" and m:

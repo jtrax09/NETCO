@@ -11,6 +11,7 @@ import {
 import { AlertTriangle, CheckCircle2, ShieldAlert } from 'lucide-react';
 import { apiRequest, formatBytes, formatTzs } from '../lib/api.ts';
 import { evaluateRouterHealth } from '../lib/routerHealth.ts';
+import { WifiConnectCard } from './WifiConnectCard.tsx';
 
 interface DashboardSummary {
   operatingMode?: 'STANDALONE_MODE' | 'MIKROTIK_MODE';
@@ -61,10 +62,11 @@ interface DashboardSummary {
 interface Props {
   token: string;
   refreshTrigger: number;
+  canManageWifi?: boolean;
   onNavigate: (section: string) => void;
 }
 
-export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
+export function DashboardView({ token, refreshTrigger, canManageWifi = true, onNavigate }: Props) {
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -356,6 +358,14 @@ export function DashboardView({ token, refreshTrigger, onNavigate }: Props) {
           )}
         </div>
       </div>
+
+      <WifiConnectCard
+        token={token}
+        canManage={canManageWifi}
+        refreshTrigger={refreshTrigger}
+        compact={true}
+        onConnected={() => void load()}
+      />
     </div>
   );
 }

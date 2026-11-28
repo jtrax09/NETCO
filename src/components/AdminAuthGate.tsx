@@ -6,6 +6,7 @@ import {
   ArrowRight,
   Building2,
   CheckCircle2,
+  CreditCard,
   Eye,
   EyeOff,
   Globe,
@@ -16,6 +17,7 @@ import {
   Phone,
   ShieldCheck,
   User,
+  Wifi,
 } from 'lucide-react';
 import { auth, googleAuthProvider } from '../lib/firebase.ts';
 import { apiRequest } from '../lib/api.ts';
@@ -218,109 +220,152 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
   };
 
   return (
-    <div className="min-h-screen bg-stone-100 dark:bg-[#101010] flex flex-col justify-center px-3.5 sm:px-4 py-6 sm:py-10">
-      <div className="max-w-md w-full mx-auto space-y-5">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-full flex items-center justify-between gap-2">
-            <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+    <div className="min-h-[100dvh] bg-stone-100 dark:bg-[#08090C] cinematic-backdrop flex flex-col justify-center px-3.5 sm:px-6 py-4 sm:py-6">
+      <div className="max-w-5xl w-full mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-center">
+        {/* Desktop Cinematic Brand Showcase */}
+        <aside className="hidden lg:flex lg:col-span-6 flex-col justify-between p-7 rounded-3xl bg-gradient-to-br from-[#101219] via-[#131722] to-[#0A0C10] border border-[#FFD400]/22 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.85)] text-white relative overflow-hidden min-h-[470px]">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute -top-24 -right-24 w-64 h-64 rounded-full bg-[#FFD400]/12 blur-3xl"
+          />
+          <div className="relative z-10 space-y-6">
+            <TraxLogo variant="banner" />
+            <div className="space-y-2.5 pt-2">
+              <span className="inline-flex items-center gap-1.5 font-futuristic text-[10px] uppercase tracking-[0.2em] text-[#FFD400]">
+                {t.staffConsole}
+              </span>
+              <h1 className="font-display text-3xl font-bold tracking-tight leading-tight text-white text-balance">
+                WiFi Billing &amp; Network Command Center
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-md">
+                Operate voucher hotspots, mobile money &amp; card checkouts, FreeRADIUS policies, and MikroTik gateways from one unified console.
+              </p>
+            </div>
+          </div>
+
+          <div className="relative z-10 space-y-2.5 pt-6 border-t border-white/10 text-xs">
+            <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white/[0.04] border border-white/[0.06]">
+              <Wifi className="w-4 h-4 text-[#FFD400] shrink-0" />
+              <span className="text-zinc-200">Standalone Mode &amp; MikroTik RouterOS API + MNDP discovery</span>
+            </div>
+            <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white/[0.04] border border-white/[0.06]">
+              <CreditCard className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="text-zinc-200">M-Pesa, Airtel Money, Tigo Pesa, HaloPesa &amp; Card billing</span>
+            </div>
+            <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white/[0.04] border border-white/[0.06]">
+              <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
+              <span className="text-zinc-200">Multi-tenant workspace isolation &amp; role-based access</span>
+            </div>
+          </div>
+        </aside>
+
+        {/* Fitted Auth Panel */}
+        <div className="lg:col-span-6 w-full max-w-[430px] mx-auto space-y-3.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="lg:hidden text-[11px] font-futuristic uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
               {t.staffConsole}
+            </span>
+            <span className="hidden lg:inline text-[11px] font-mono text-zinc-500 dark:text-zinc-400">
+              Secure Operator Access
             </span>
             <div className="flex items-center gap-2">
               <LanguageSwitcher lang={lang} onToggleLang={onToggleLang} />
               <button
                 type="button"
                 onClick={onSwitchToPortal}
-                className="btn-secondary min-h-[38px] px-3 text-xs"
+                className="btn-secondary min-h-[36px] px-3 py-1.5 text-xs"
               >
                 {t.buyVoucher}
                 <ArrowRight className="w-3.5 h-3.5 text-[#B8860B] dark:text-[#FFD400]" />
               </button>
             </div>
           </div>
-          <div className="p-3 rounded-2xl bg-[#161618] border border-zinc-800">
-            <TraxLogo variant="banner" />
-          </div>
-        </div>
 
-        <div className="bg-white dark:bg-[#161618] border border-stone-200 dark:border-zinc-800 rounded-2xl p-5 sm:p-6 space-y-5 shadow-sm">
-          <div>
-            <h2 className="text-lg font-semibold text-[#101010] dark:text-white">
-              {mode === 'bootstrap'
-                ? t.claimTitle
-                : mode === 'register'
-                ? t.registerTitle
-                : mode === 'forgot'
-                ? t.resetTitle
-                : t.signInTitle}
-            </h2>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-              {mode === 'bootstrap'
-                ? t.claimSubtitle
-                : mode === 'register'
-                ? t.registerSubtitle
-                : mode === 'forgot'
-                ? forgotStep === 'request'
-                  ? t.resetReqSubtitle
-                  : t.resetVerifySubtitle
-                : t.signInSubtitle}
-            </p>
+          <div className="lg:hidden flex justify-center">
+            <div className="w-full flex justify-center p-3 rounded-2xl bg-[#101217] border border-[#FFD400]/25 shadow-[0_12px_32px_-16px_rgba(255,212,0,0.28)]">
+              <TraxLogo variant="banner" />
+            </div>
           </div>
 
-          {mode !== 'forgot' && (
-            <div className="btn-tab-group w-full overflow-x-auto">
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('login');
-                  setError(null);
-                  setInfoMessage(null);
-                }}
-                className={`flex-1 ${mode === 'login' ? 'btn-tab-active' : 'btn-tab'}`}
-              >
-                {t.tabLogin}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('register');
-                  setError(null);
-                  setInfoMessage(null);
-                }}
-                className={`flex-1 ${mode === 'register' ? 'btn-tab-active' : 'btn-tab'}`}
-              >
-                {t.tabRegister}
-              </button>
-              {bootstrapStatus && (bootstrapStatus.needsPasswordBootstrap || bootstrapStatus.envPasscodeConfigured) && (
+          <div className="bg-white/95 dark:bg-[#12141A]/95 backdrop-blur-xl border border-stone-200 dark:border-white/12 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-xl">
+            <div>
+              <h2 className="font-display text-lg font-bold tracking-tight text-[#101010] dark:text-white">
+                {mode === 'bootstrap'
+                  ? t.claimTitle
+                  : mode === 'register'
+                  ? t.registerTitle
+                  : mode === 'forgot'
+                  ? t.resetTitle
+                  : t.signInTitle}
+              </h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                {mode === 'bootstrap'
+                  ? t.claimSubtitle
+                  : mode === 'register'
+                  ? t.registerSubtitle
+                  : mode === 'forgot'
+                  ? forgotStep === 'request'
+                    ? t.resetReqSubtitle
+                    : t.resetVerifySubtitle
+                  : t.signInSubtitle}
+              </p>
+            </div>
+
+            {mode !== 'forgot' && (
+              <div className="btn-tab-group w-full overflow-x-auto">
                 <button
                   type="button"
                   onClick={() => {
-                    setMode('bootstrap');
+                    setMode('login');
                     setError(null);
                     setInfoMessage(null);
                   }}
-                  className={`flex-1 ${mode === 'bootstrap' ? 'btn-tab-active' : 'btn-tab'}`}
+                  className={`flex-1 ${mode === 'login' ? 'btn-tab-active' : 'btn-tab'}`}
                 >
-                  {t.tabBootstrap}
+                  {t.tabLogin}
                 </button>
-              )}
-            </div>
-          )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('register');
+                    setError(null);
+                    setInfoMessage(null);
+                  }}
+                  className={`flex-1 ${mode === 'register' ? 'btn-tab-active' : 'btn-tab'}`}
+                >
+                  {t.tabRegister}
+                </button>
+                {bootstrapStatus && (bootstrapStatus.needsPasswordBootstrap || bootstrapStatus.envPasscodeConfigured) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('bootstrap');
+                      setError(null);
+                      setInfoMessage(null);
+                    }}
+                    className={`flex-1 ${mode === 'bootstrap' ? 'btn-tab-active' : 'btn-tab'}`}
+                  >
+                    {t.tabBootstrap}
+                  </button>
+                )}
+              </div>
+            )}
 
-          {error && (
-            <div className="p-3 rounded-lg border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300">
-              {error}
-            </div>
-          )}
+            {error && (
+              <div className="p-2.5 rounded-lg border border-red-300 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300">
+                {error}
+              </div>
+            )}
 
-          {infoMessage && (
-            <div className="p-3 rounded-lg border border-emerald-300 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/30 text-xs text-emerald-700 dark:text-emerald-300 flex items-start gap-2">
-              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{infoMessage}</span>
-            </div>
-          )}
+            {infoMessage && (
+              <div className="p-2.5 rounded-lg border border-emerald-300 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/30 text-xs text-emerald-700 dark:text-emerald-300 flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{infoMessage}</span>
+              </div>
+            )}
 
-          <AnimatePresence mode="wait" initial={false}>
-            <MobilePageTransition key={`${mode}-${forgotStep}`}>
+            <AnimatePresence mode="wait" initial={false}>
+              <MobilePageTransition key={`${mode}-${forgotStep}`}>
           {mode === 'forgot' ? (
             forgotStep === 'request' ? (
               <form onSubmit={handleRequestReset} className="space-y-4">
@@ -693,7 +738,7 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
                 type="button"
                 disabled={loading}
                 onClick={handleGoogleSignIn}
-                className="btn-secondary w-full min-h-[46px] text-sm"
+                className="btn-secondary w-full min-h-[42px] text-sm"
               >
                 <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
                   <path
@@ -717,6 +762,7 @@ export function AdminAuthGate({ onAuthenticated, onSwitchToPortal, lang, onToggl
               </button>
             </>
           )}
+          </div>
         </div>
       </div>
     </div>

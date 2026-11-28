@@ -778,7 +778,21 @@ class TraxPythonBillingTests(unittest.TestCase):
             self.assertGreater(latest["txMb"], 0)
             self.assertGreater(latest["totalMb"], 0)
 
-            # Register a separate business tenant and verify isolated zeroed overview
+            # Verify 24h per-router CPU & memory telemetry history endpoint
+            th_s, th_b = _api(
+                self.base_url,
+                f"/api/routers/{rid}/telemetry?hours=24",
+                token=self.admin_token,
+            )
+            self.assertEqual(th_s, 200)
+            self.assertGreaterEqual(th_b["summary"]["sampleCount"], 2)
+            self.assertEqual(th_b["summary"]["latestCpuPct"], 22)
+            self.assertEqual(th_b["summary"]["latestMemoryPct"], 50.0)
+            self.assertEqual(len(th_b["samples"]), th_b["summary"]["sampleCount"])
+            self.assertEqual(th_b["samples"][-1]["cpuLoad"], 22)
+            self.assertEqual(th_b["samples"][-1]["memoryPct"], 50.0)
+
+            # Register a separate business tenant and verify isolated zeroed overview & cross-tenant block
             sb, bb = _api(
                 self.base_url,
                 "/api/auth/register-business",
@@ -795,6 +809,12 @@ class TraxPythonBillingTests(unittest.TestCase):
                 },
             )
             self.assertEqual(sb, 201)
+            th_deny, _ = _api(
+                self.base_url,
+                f"/api/routers/{rid}/telemetry?hours=24",
+                token=bb["token"],
+            )
+            self.assertEqual(th_deny, 403)
             iso_s, iso_b = _api(
                 self.base_url,
                 "/api/routers/overview",
@@ -854,6 +874,683 @@ class TraxPythonBillingTests(unittest.TestCase):
             stop_flag.set()
             srv_sock.close()
             t.join(timeout=2)
+
+    def test_network_scanner_discovers_routeros_and_mndp(self) -> None:
+        tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        tcp_sock.bind(("127.0.0.1", 0))
+        tcp_sock.listen(4)
+        ros_port = tcp_sock.getsockname()[1]
+
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_sock.bind(("127.0.0.1", 0))
+        mndp_port = udp_sock.getsockname()[1]
+
+        stop_flag = threading.Event()
+
+        def _tlv(tag: int, val: bytes) -> bytes:
+            return tag.to_bytes(2, "big") + len(val).to_bytes(2, "big") + val
+
+        mndp_packet = (
+            b"\x00\x00\x00\x01"
+            + _tlv(1, bytes.fromhex("48A98A112233"))
+            + _tlv(5, b"Dar-Core-CCR")
+            + _tlv(7, b"7.14.2")
+            + _tlv(12, b"CCR2004")
+        )
+
+        def _mock_tcp() -> None:
+            while not stop_flag.is_set():
+                try:
+                    tcp_sock.settimeout(0.2)
+                    conn, _ = tcp_sock.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                with conn:
+                    words = _read_ros_sentence(conn)
+                    if words and words[0] == "/login":
+                        conn.sendall(encode_sentence(["!done"]))
+
+        def _mock_udp() -> None:
+            while not stop_flag.is_set():
+                try:
+                    udp_sock.settimeout(0.2)
+                    _, addr = udp_sock.recvfrom(1024)
+                    udp_sock.sendto(mndp_packet, addr)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+
+        t_tcp = threading.Thread(target=_mock_tcp, daemon=True)
+        t_udp = threading.Thread(target=_mock_udp, daemon=True)
+        t_tcp.start()
+        t_udp.start()
+
+        try:
+            # Oversized CIDR (/16) and metadata IP range (169.254.169.254) must be rejected cleanly
+            bad1, _ = _api(
+                self.base_url,
+                "/api/routers/scan",
+                method="POST",
+                token=self.admin_token,
+                body={"ipRange": "192.168.0.0/16", "apiPort": ros_port},
+            )
+            self.assertEqual(bad1, 400)
+
+            bad2, _ = _api(
+                self.base_url,
+                "/api/routers/scan",
+                method="POST",
+                token=self.admin_token,
+                body={"ipRange": "169.254.169.254", "apiPort": ros_port},
+            )
+            self.assertEqual(bad2, 400)
+
+            # Scan 127.0.0.1-127.0.0.1 -> discovers both RouterOS API and MNDP attributes
+            ok_s, ok_body = _api(
+                self.base_url,
+                "/api/routers/scan",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "ipRange": "127.0.0.1-127.0.0.1",
+                    "apiPort": ros_port,
+                    "includeMndp": True,
+                    "mndpPort": mndp_port,
+                },
+            )
+            self.assertEqual(ok_s, 200)
+            self.assertEqual(ok_body["scannedHosts"], 1)
+            self.assertEqual(len(ok_body["discovered"]), 1)
+            found = ok_body["discovered"][0]
+            self.assertEqual(found["host"], "127.0.0.1")
+            self.assertEqual(found["apiPort"], ros_port)
+            self.assertEqual(found["suggestedName"], "Dar-Core-CCR")
+            self.assertEqual(found["boardName"], "CCR2004")
+            self.assertEqual(found["routerOsVersion"], "7.14.2")
+            self.assertEqual(found["macAddress"], "48:A9:8A:11:22:33")
+            self.assertIn("ROUTEROS_API", found["discoveryMethods"])
+            self.assertIn("MNDP", found["discoveryMethods"])
+            self.assertTrue(found["apiVerified"])
+            self.assertFalse(found["alreadyAdded"])
+
+            # Add discovered router, then re-scan and verify alreadyAdded flips to True
+            add_s, _ = _api(
+                self.base_url,
+                "/api/routers",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "name": found["suggestedName"],
+                    "host": found["host"],
+                    "apiPort": found["apiPort"],
+                    "routerOsFamily": found["routerOsFamily"],
+                },
+            )
+            self.assertEqual(add_s, 201)
+
+            re_s, re_body = _api(
+                self.base_url,
+                "/api/routers/scan",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "ipRange": "127.0.0.1",
+                    "apiPort": ros_port,
+                    "includeMndp": False,
+                },
+            )
+            self.assertEqual(re_s, 200)
+            self.assertTrue(re_body["discovered"][0]["alreadyAdded"])
+        finally:
+            stop_flag.set()
+            tcp_sock.close()
+            udp_sock.close()
+            t_tcp.join(timeout=2)
+            t_udp.join(timeout=2)
+
+    def test_bulk_command_pushes_ssid_and_ntp_simultaneously(self) -> None:
+        servers: list[socket.socket] = []
+        ports: list[int] = []
+        commands_by_port: dict[int, list[list[str]]] = {}
+        stop_flag = threading.Event()
+        threads: list[threading.Thread] = []
+
+        for _ in range(2):
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(4)
+            p = srv.getsockname()[1]
+            servers.append(srv)
+            ports.append(p)
+            commands_by_port[p] = []
+
+            def _serve(sock_obj: socket.socket = srv, port_num: int = p) -> None:
+                while not stop_flag.is_set():
+                    try:
+                        sock_obj.settimeout(0.2)
+                        conn, _ = sock_obj.accept()
+                    except TimeoutError:
+                        continue
+                    except OSError:
+                        break
+                    with conn:
+                        while True:
+                            words = _read_ros_sentence(conn)
+                            if not words:
+                                break
+                            commands_by_port[port_num].append(words)
+                            cmd = words[0]
+                            if cmd == "/login":
+                                conn.sendall(encode_sentence(["!done"]))
+                            elif cmd == "/interface/wireless/print":
+                                conn.sendall(encode_sentence(["!re", "=.id=*1", "=name=wlan1", "=ssid=OLD-WIFI"]))
+                                conn.sendall(encode_sentence(["!done"]))
+                            else:
+                                conn.sendall(encode_sentence(["!done"]))
+
+            th = threading.Thread(target=_serve, daemon=True)
+            th.start()
+            threads.append(th)
+
+        try:
+            r1_s, r1 = _api(
+                self.base_url,
+                "/api/routers",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "name": "Bulk AP North",
+                    "host": "127.0.0.1",
+                    "apiPort": ports[0],
+                    "username": "admin",
+                    "password": "secret",
+                    "routerOsFamily": "ROUTEROS_V7",
+                },
+            )
+            self.assertEqual(r1_s, 201)
+
+            r2_s, r2 = _api(
+                self.base_url,
+                "/api/routers",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "name": "Bulk AP South",
+                    "host": "127.0.0.1",
+                    "apiPort": ports[1],
+                    "username": "admin",
+                    "password": "secret",
+                    "routerOsFamily": "ROUTEROS_V6",
+                },
+            )
+            self.assertEqual(r2_s, 201)
+
+            r3_s, r3 = _api(
+                self.base_url,
+                "/api/routers",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "name": "Unconfigured Standby",
+                    "host": "",
+                    "apiPort": 8728,
+                    "routerOsFamily": "ROUTEROS_V7",
+                },
+            )
+            self.assertEqual(r3_s, 201)
+
+            r1_id = r1["router"]["id"]
+            r2_id = r2["router"]["id"]
+            r3_id = r3["router"]["id"]
+
+            # Push SSID simultaneously to r1, r2, and unconfigured r3
+            ssid_s, ssid_res = _api(
+                self.base_url,
+                "/api/routers/bulk-command",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "routerIds": [r1_id, r2_id, r3_id],
+                    "commandType": "UPDATE_SSID",
+                    "params": {"ssid": "TRAX-CAMPUS-5G"},
+                },
+            )
+            self.assertEqual(ssid_s, 200)
+            self.assertEqual(ssid_res["totalRequested"], 3)
+            self.assertEqual(ssid_res["succeededCount"], 2)
+            self.assertEqual(ssid_res["failedCount"], 1)
+            self.assertTrue(ssid_res["results"][0]["success"])
+            self.assertTrue(ssid_res["results"][1]["success"])
+            self.assertFalse(ssid_res["results"][2]["success"])
+
+            for p in ports:
+                self.assertTrue(
+                    any(
+                        c[0] == "/interface/wireless/set" and "=ssid=TRAX-CAMPUS-5G" in c
+                        for c in commands_by_port[p]
+                    )
+                )
+
+            # Push NTP server settings to r1 (ROS v7) and r2 (ROS v6)
+            ntp_s, ntp_res = _api(
+                self.base_url,
+                "/api/routers/bulk-command",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "routerIds": [r1_id, r2_id],
+                    "commandType": "UPDATE_NTP",
+                    "params": {
+                        "primaryServer": "pool.ntp.org",
+                        "secondaryServer": "time.cloudflare.com",
+                        "enabled": True,
+                    },
+                },
+            )
+            self.assertEqual(ntp_s, 200)
+            self.assertEqual(ntp_res["succeededCount"], 2)
+            self.assertTrue(
+                any(
+                    c[0] == "/system/ntp/client/set" and "=servers=pool.ntp.org,time.cloudflare.com" in c
+                    for c in commands_by_port[ports[0]]
+                )
+            )
+            self.assertTrue(
+                any(
+                    c[0] == "/system/ntp/client/set" and "=primary-ntp=pool.ntp.org" in c and "=secondary-ntp=time.cloudflare.com" in c
+                    for c in commands_by_port[ports[1]]
+                )
+            )
+
+            # Invalid SSID (> 32 chars) must be rejected cleanly with 400
+            bad_s, _ = _api(
+                self.base_url,
+                "/api/routers/bulk-command",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "routerIds": [r1_id],
+                    "commandType": "UPDATE_SSID",
+                    "params": {"ssid": "X" * 33},
+                },
+            )
+            self.assertEqual(bad_s, 400)
+
+            # Cross-tenant router ID in bulk-command must be denied with 403
+            sb, bb = _api(
+                self.base_url,
+                "/api/auth/register-business",
+                method="POST",
+                body={
+                    "businessName": "Mwanza Mesh",
+                    "ownerName": "Neema",
+                    "ownerEmail": "neema@mwanzamesh.co.tz",
+                    "password": "MwanzaPassword#2026",
+                    "phone": "+255754444555",
+                    "country": "Tanzania",
+                    "region": "Mwanza",
+                    "planCode": "STARTER",
+                },
+            )
+            self.assertEqual(sb, 201)
+            deny_s, _ = _api(
+                self.base_url,
+                "/api/routers/bulk-command",
+                method="POST",
+                token=bb["token"],
+                body={
+                    "routerIds": [r1_id],
+                    "commandType": "UPDATE_NTP",
+                    "params": {"primaryServer": "pool.ntp.org"},
+                },
+            )
+            self.assertEqual(deny_s, 403)
+        finally:
+            stop_flag.set()
+            for srv in servers:
+                srv.close()
+            for th in threads:
+                th.join(timeout=2)
+
+    def test_router_auto_sync_profiles_on_package_create_and_update(self) -> None:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        ros_port = srv.getsockname()[1]
+        commands: list[list[str]] = []
+        created_profiles: dict[str, str] = {}
+        stop_flag = threading.Event()
+
+        def _serve() -> None:
+            while not stop_flag.is_set():
+                try:
+                    srv.settimeout(0.2)
+                    conn, _ = srv.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                with conn:
+                    while True:
+                        words = _read_ros_sentence(conn)
+                        if not words:
+                            break
+                        commands.append(words)
+                        cmd = words[0]
+                        if cmd == "/login":
+                            conn.sendall(encode_sentence(["!done"]))
+                        elif cmd == "/ip/hotspot/user/profile/print":
+                            target_name = ""
+                            for w in words[1:]:
+                                if w.startswith("?name="):
+                                    target_name = w.split("=", 1)[1]
+                            if target_name in created_profiles:
+                                conn.sendall(
+                                    encode_sentence(
+                                        ["!re", f"=.id={created_profiles[target_name]}", f"=name={target_name}"]
+                                    )
+                                )
+                            conn.sendall(encode_sentence(["!done"]))
+                        elif cmd == "/ip/hotspot/user/profile/add":
+                            prof_name = ""
+                            for w in words[1:]:
+                                if w.startswith("=name="):
+                                    prof_name = w.split("=", 1)[1]
+                            if prof_name:
+                                created_profiles[prof_name] = f"*{len(created_profiles) + 1}"
+                            conn.sendall(encode_sentence(["!done"]))
+                        else:
+                            conn.sendall(encode_sentence(["!done"]))
+
+        th = threading.Thread(target=_serve, daemon=True)
+        th.start()
+
+        try:
+            # Default setting must be False
+            gs, gbody = _api(self.base_url, "/api/routers/settings", token=self.admin_token)
+            self.assertEqual(gs, 200)
+            self.assertFalse(gbody["autoSyncProfiles"])
+
+            # Non-boolean autoSyncProfiles must fail with 400
+            bad_s, _ = _api(
+                self.base_url,
+                "/api/routers/settings",
+                method="PATCH",
+                token=self.admin_token,
+                body={"autoSyncProfiles": "yes"},
+            )
+            self.assertEqual(bad_s, 400)
+
+            # Add configured MikroTik router
+            rs, _ = _api(
+                self.base_url,
+                "/api/routers",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "name": "AutoSync Core",
+                    "host": "127.0.0.1",
+                    "apiPort": ros_port,
+                    "username": "admin",
+                    "password": "secret",
+                    "routerOsFamily": "ROUTEROS_V7",
+                },
+            )
+            self.assertEqual(rs, 201)
+
+            # Create package while autoSyncProfiles is False -> no push sent
+            p1_s, p1 = _api(
+                self.base_url,
+                "/api/packages",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "name": "Manual Sync Pack",
+                    "category": "HOURLY",
+                    "priceTzs": 1000,
+                    "durationMinutes": 60,
+                    "downloadKbps": 4000,
+                    "uploadKbps": 2000,
+                },
+            )
+            self.assertEqual(p1_s, 201)
+            self.assertFalse(p1["profileSync"]["enabled"])
+            self.assertEqual(len(commands), 0)
+
+            # Enable autoSyncProfiles
+            es, ebody = _api(
+                self.base_url,
+                "/api/routers/settings",
+                method="PATCH",
+                token=self.admin_token,
+                body={"autoSyncProfiles": True},
+            )
+            self.assertEqual(es, 200)
+            self.assertTrue(ebody["autoSyncProfiles"])
+
+            # Create package -> automatically triggers /ip/hotspot/user/profile/add
+            p2_s, p2 = _api(
+                self.base_url,
+                "/api/packages",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "name": "Auto Sync Fiber Pack",
+                    "category": "DAILY",
+                    "priceTzs": 2500,
+                    "durationMinutes": 1440,
+                    "downloadKbps": 12000,
+                    "uploadKbps": 6000,
+                },
+            )
+            self.assertEqual(p2_s, 201)
+            self.assertTrue(p2["profileSync"]["enabled"])
+            self.assertEqual(p2["profileSync"]["synced"], 1)
+            pkg2_id = p2["package"]["id"]
+            self.assertTrue(
+                any(
+                    c[0] == "/ip/hotspot/user/profile/add"
+                    and f"=name=trax-{pkg2_id}" in c
+                    and "=rate-limit=6000k/12000k" in c
+                    for c in commands
+                )
+            )
+
+            # Update package -> automatically triggers /ip/hotspot/user/profile/set
+            u2_s, u2 = _api(
+                self.base_url,
+                f"/api/packages/{pkg2_id}",
+                method="PATCH",
+                token=self.admin_token,
+                body={"downloadKbps": 20000, "uploadKbps": 10000},
+            )
+            self.assertEqual(u2_s, 200)
+            self.assertTrue(u2["profileSync"]["enabled"])
+            self.assertEqual(u2["profileSync"]["synced"], 1)
+            self.assertTrue(
+                any(
+                    c[0] == "/ip/hotspot/user/profile/set"
+                    and "=rate-limit=10000k/20000k" in c
+                    for c in commands
+                )
+            )
+        finally:
+            stop_flag.set()
+            srv.close()
+            th.join(timeout=2)
+
+    def test_business_details_and_portal_reflection(self) -> None:
+        # Unsafe website scheme must be rejected
+        bad_url_s, _ = _api(
+            self.base_url,
+            "/api/business/settings",
+            method="PATCH",
+            token=self.admin_token,
+            body={"websiteUrl": "javascript:alert(1)"},
+        )
+        self.assertEqual(bad_url_s, 400)
+
+        # Update rich business page details
+        upd_s, upd = _api(
+            self.base_url,
+            "/api/business/settings",
+            method="PATCH",
+            token=self.admin_token,
+            body={
+                "hotspotTitle": "Serengeti Mesh WiFi",
+                "hotspotSupportPhone": "+255754888999",
+                "description": "High-speed prepaid fiber hotspot across Arusha & Dar.",
+                "physicalAddress": "Ohio Street, Plot 22",
+                "city": "Dar es Salaam",
+                "websiteUrl": "https://serengetimesh.co.tz",
+                "supportHours": "Daily 06:00 - 23:00 EAT",
+            },
+        )
+        self.assertEqual(upd_s, 200)
+        self.assertEqual(upd["settings"]["city"], "Dar es Salaam")
+        self.assertEqual(upd["settings"]["websiteUrl"], "https://serengetimesh.co.tz")
+
+        # Dedicated GET /api/business/details endpoint
+        det_s, det = _api(self.base_url, "/api/business/details", token=self.admin_token)
+        self.assertEqual(det_s, 200)
+        self.assertEqual(det["business"]["physicalAddress"], "Ohio Street, Plot 22")
+        self.assertEqual(det["business"]["supportHours"], "Daily 06:00 - 23:00 EAT")
+        self.assertIn("metrics", det)
+        self.assertIn("packagesSummary", det)
+
+        # Reflected cleanly on public /api/portal/businesses
+        pb_s, pb = _api(self.base_url, "/api/portal/businesses")
+        self.assertEqual(pb_s, 200)
+        self.assertEqual(pb["businesses"][0]["hotspotTitle"], "Serengeti Mesh WiFi")
+        self.assertEqual(pb["businesses"][0]["websiteUrl"], "https://serengetimesh.co.tz")
+
+    def test_admin_wifi_quick_connect(self) -> None:
+        # Reject forbidden public DNS / metadata IPs
+        for bad_ip in ("8.8.8.8", "169.254.169.254"):
+            bad_s, _ = _api(
+                self.base_url,
+                "/api/wifi/connect",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "wifiSsid": "MyShop-WiFi",
+                    "gatewayType": "POCKET_WIFI",
+                    "gatewayIp": bad_ip,
+                },
+            )
+            self.assertEqual(bad_s, 400)
+
+        # Link Pocket WiFi in Standalone Mode cleanly
+        pw_s, pw = _api(
+            self.base_url,
+            "/api/wifi/connect",
+            method="POST",
+            token=self.admin_token,
+            body={
+                "wifiSsid": "Airtel-Shop-4G",
+                "gatewayType": "POCKET_WIFI",
+                "gatewayIp": "192.168.8.1",
+            },
+        )
+        self.assertEqual(pw_s, 200)
+        self.assertEqual(pw["wifiSsid"], "Airtel-Shop-4G")
+        self.assertEqual(pw["operatingMode"], "STANDALONE_MODE")
+
+        st_s, st = _api(self.base_url, "/api/wifi/status", token=self.admin_token)
+        self.assertEqual(st_s, 200)
+        self.assertEqual(st["wifiSsid"], "Airtel-Shop-4G")
+        self.assertEqual(st["wifiGatewayIp"], "192.168.8.1")
+
+        # Link & connect real MikroTik WiFi router + push SSID
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        ros_port = srv.getsockname()[1]
+        commands: list[list[str]] = []
+        stop_flag = threading.Event()
+
+        def _serve() -> None:
+            while not stop_flag.is_set():
+                try:
+                    srv.settimeout(0.2)
+                    conn, _ = srv.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                with conn:
+                    while True:
+                        words = _read_ros_sentence(conn)
+                        if not words:
+                            break
+                        commands.append(words)
+                        cmd = words[0]
+                        if cmd == "/login":
+                            conn.sendall(encode_sentence(["!done"]))
+                        elif cmd == "/system/resource/print":
+                            conn.sendall(
+                                encode_sentence(
+                                    [
+                                        "!re",
+                                        "=cpu-load=14",
+                                        "=free-memory=268435456",
+                                        "=total-memory=536870912",
+                                        "=uptime=2d",
+                                        "=version=7.15",
+                                        "=board-name=hAP ax2",
+                                    ]
+                                )
+                            )
+                            conn.sendall(encode_sentence(["!done"]))
+                        elif cmd == "/interface/wireless/print":
+                            conn.sendall(encode_sentence(["!re", "=.id=*1", "=name=wlan1", "=ssid=OLD"]))
+                            conn.sendall(encode_sentence(["!done"]))
+                        else:
+                            conn.sendall(encode_sentence(["!done"]))
+
+        th = threading.Thread(target=_serve, daemon=True)
+        th.start()
+
+        try:
+            mk_s, mk = _api(
+                self.base_url,
+                "/api/wifi/connect",
+                method="POST",
+                token=self.admin_token,
+                body={
+                    "wifiSsid": "TRAX-CAFE-PRO",
+                    "gatewayType": "MIKROTIK",
+                    "gatewayIp": "127.0.0.1",
+                    "apiPort": ros_port,
+                    "username": "admin",
+                    "password": "secret",
+                    "updateRouterSsid": True,
+                },
+            )
+            self.assertEqual(mk_s, 200)
+            self.assertTrue(mk["telemetry"]["connected"])
+            self.assertEqual(mk["operatingMode"], "MIKROTIK_MODE")
+            self.assertEqual(mk["ssidPush"]["succeededCount"], 1)
+            self.assertTrue(
+                any(c[0] == "/interface/wireless/set" and "=ssid=TRAX-CAFE-PRO" in c for c in commands)
+            )
+
+            # Unlink WiFi clears workspace wifi fields cleanly
+            del_s, del_body = _api(
+                self.base_url,
+                "/api/wifi/connect",
+                method="DELETE",
+                token=self.admin_token,
+            )
+            self.assertEqual(del_s, 200)
+            self.assertIsNone(del_body["wifiSsid"])
+        finally:
+            stop_flag.set()
+            srv.close()
+            th.join(timeout=2)
 
 
 if __name__ == "__main__":
